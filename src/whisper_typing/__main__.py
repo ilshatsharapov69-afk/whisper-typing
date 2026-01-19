@@ -18,7 +18,8 @@ DEFAULT_CONFIG = {
     "model": "openai/whisper-base",
     "language": None,
     "gemini_api_key": "",
-    "gemini_prompt": None 
+    "gemini_prompt": None,
+    "microphone_name": None
 }
 
 def load_config(config_path: str = "config.json") -> Dict[str, Any]:
@@ -31,6 +32,15 @@ def load_config(config_path: str = "config.json") -> Dict[str, Any]:
         except Exception as e:
             print(f"Error loading {config_path}: {e}")
     return {}
+
+def save_config(config: Dict[str, Any], config_path: str = "config.json"):
+    """Save configuration to JSON file."""
+    try:
+        with open(config_path, "w") as f:
+            json.dump(config, f, indent=4)
+        print(f"Configuration saved to {config_path}")
+    except Exception as e:
+        print(f"Error saving config: {e}")
 
 class WhisperTypingApp:
     def __init__(self):
@@ -46,6 +56,7 @@ class WhisperTypingApp:
         self.paused = False
         self.current_model_id = None
         self.current_language = None
+        self.current_mic_index = None
         
     def load_configuration(self, args):
         """Load and merge configuration."""
@@ -62,6 +73,50 @@ class WhisperTypingApp:
         if args.language: self.config["language"] = args.language
         if args.api_key: self.config["gemini_api_key"] = args.api_key
 
+    def select_microphone(self):
+        """Interactive microphone selection."""
+        devices = AudioRecorder.list_devices()
+        if not devices:
+            print("No input devices found!")
+            return None
+            
+        print("\nEnter valid device ID to select, or 'c' to cancel.")
+        while True:
+            try:
+                user_input = input("Select Microphone ID: ").strip()
+                if user_input.lower() == 'c':
+                    return None
+                    
+                idx = int(user_input)
+                # verify index exists in our filtered list
+                selected_dev = next((d for d in devices if d[0] == idx), None)
+                
+                if selected_dev:
+                    print(f"Selected: {selected_dev[1]}")
+                    self.config["microphone_name"] = selected_dev[1]
+                    save_config(self.config) # Save permanently
+                    return idx
+                else:
+                    print("Invalid ID. Please choose from the list above.")
+            except ValueError:
+                print("Invalid input. Enter a number or 'c'.")
+
+    def get_mic_index_from_config(self):
+        """Find device index based on configured name."""
+        mic_name = self.config.get("microphone_name")
+        if not mic_name:
+            return None
+            
+        # We need to query devices to find the index matching the name
+        import sounddevice as sd
+        devices = sd.query_devices()
+        for i, dev in enumerate(devices):
+            if dev['max_input_channels'] > 0 and mic_name in dev['name']:
+                 return i
+        
+        print(f"Configured microphone '{mic_name}' not found.")
+        return None
+
     def initialize_components(self):
         """Initialize or re-initialize components."""
         print(f"Initializing Whisper Typing...")
@@ -70,6 +125,20 @@ class WhisperTypingApp:
         print(f"Improve Hotkey: {self.config['improve_hotkey']}")
         print(f"Model:          {self.config['model']}")
         print(f"AI Enabled:     {'Yes' if self.config['gemini_api_key'] else 'No'}")
+
+        # Microphone Setup
+        mic_index = self.get_mic_index_from_config()
+        if mic_index is None:
+            print("\nMicrophone not configured or not found.")
+            mic_index = self.select_microphone()
+            if mic_index is None:
+                # If they cancel or fail to select, we might fallback to default (None) or exit
+                print("Using default system microphone.")
+                mic_index = None # sounddevice execution uses default if device is None
+
+        self.current_mic_index = mic_index
+        mic_name = self.config.get("microphone_name", "Default")
+        print(f"Microphone:     {mic_name} (ID: {mic_index if mic_index is not None else 'Default'})")
 
         try:
             # Reload Optimization: Check if model/language changed
@@ -84,9 +153,8 @@ class WhisperTypingApp:
             else:
                 print("Transcriber configuration unchanged, keeping existing model.")
             
-            # These are cheap to recreate, but effectively just updating config is cleaner if we supported it.
-            # Recreating is safer to ensure new keys/settings are picked up.
-            self.recorder = AudioRecorder()
+            # Recreate recorder with specific device
+            self.recorder = AudioRecorder(device_index=self.current_mic_index)
             self.typer = Typer()
             self.improver = AIImprover(api_key=self.config["gemini_api_key"])
             
@@ -108,7 +176,7 @@ class WhisperTypingApp:
             })
             self.listener.start()
             print(f"Ready! Press {self.config['hotkey']} to toggle recording.")
-            print("Commands: '/p' pause, '/q' quit, '/r' reload.")
+            print("Commands: '/p' pause, '/q' quit, '/r' reload, '/c' change mic.")
         except ValueError as e:
             print(f"Invalid hotkey format: {e}")
 
@@ -224,6 +292,14 @@ def main() -> None:
                     app.start_listener()
             elif cmd == '/p':
                 app.toggle_pause()
+            elif cmd == '/c':
+                print("Changing microphone...")
+                # Temporarily stop listener during selection to avoid hotkey conflict
+                app.stop() 
+                app.select_microphone()
+                # Re-init components (recreates recorder with new dev)
+                if app.initialize_components():
+                    app.start_listener()
             elif cmd:
                 print(f"Unknown command: {cmd}")
     except KeyboardInterrupt:

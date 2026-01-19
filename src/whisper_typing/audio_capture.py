@@ -8,12 +8,25 @@ import sounddevice as sd
 
 
 class AudioRecorder:
-    def __init__(self, sample_rate=16000, channels=1):
+    def __init__(self, sample_rate=16000, channels=1, device_index=None):
         self.sample_rate = sample_rate
         self.channels = channels
+        self.device_index = device_index
         self.recording = False
         self.frames = queue.Queue()
         self.thread = None
+
+    @staticmethod
+    def list_devices():
+        """List all available input devices."""
+        print("\nAvailable Input Devices:")
+        devices = sd.query_devices()
+        input_devices = []
+        for i, dev in enumerate(devices):
+            if dev['max_input_channels'] > 0:
+                print(f"{i}: {dev['name']}")
+                input_devices.append((i, dev['name']))
+        return input_devices
 
     def _callback(self, indata, frames, time, status):
         """Callback for sounddevice."""
@@ -23,13 +36,18 @@ class AudioRecorder:
 
     def _record(self):
         """Internal recording loop."""
-        with sd.InputStream(
-            samplerate=self.sample_rate,
-            channels=self.channels,
-            callback=self._callback
-        ):
-            while self.recording:
-                sd.sleep(100)
+        try:
+            with sd.InputStream(
+                samplerate=self.sample_rate,
+                channels=self.channels,
+                device=self.device_index,
+                callback=self._callback
+            ):
+                while self.recording:
+                    sd.sleep(100)
+        except Exception as e:
+            print(f"Error in recording loop: {e}")
+            self.recording = False
 
     def start(self):
         """Start recording."""
