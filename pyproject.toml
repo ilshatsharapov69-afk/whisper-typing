@@ -1,12 +1,12 @@
 [project]
 name = "whisper-typing"
 version = "0.0.0"
-description = "An example Python project for generating a Fibonacci sequence"
+description = "A powerful, background speech-to-text application for Windows that runs locally"
 readme = "README.md"
-requires-python = ">=3.13"
-license = "Unlicense"
+requires-python = ">=3.13.7"
+license = "MIT"
 authors = [
-  { name = "Leonardo Bonacci", email = "leonardo@bonacci.com" },
+  { name = "Roger P. Filomeno", email = "rpfilomeno@gmail.com" },
 ]
 keywords = ["example", "fibonacci"]
 classifiers = [
@@ -34,8 +34,8 @@ dependencies = [
 ]
 
 [project.urls]
-issues = "https://github.com/leonardo/bonacci/issues"
-repository = "https://github.com/leonardo/bonacci.git"
+issues = "https://github.com/rpfilomeno/whispher-typing/issues"
+repository = "https://github.com/rpfilomeno/whispher-typing"
 
 [project.scripts]
 whisper-typing = "whisper_typing.__main__:main"
