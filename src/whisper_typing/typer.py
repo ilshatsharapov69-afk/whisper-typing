@@ -1,42 +1,55 @@
-from pynput.keyboard import Controller, Key
+import threading
 import time
 import pyperclip
+from typing import Optional, Callable
+from pynput.keyboard import Controller, Key
 
 class Typer:
-    def __init__(self):
+    def __init__(self, wpm: int = 40):
         self.keyboard = Controller()
+        self.wpm = wpm
 
-    def type_text(self, text: str):
-        """Type text into the active window using clipboard paste (Ctrl+V)."""
+    def type_text(self, text: str, stop_event: Optional[threading.Event] = None, check_focus: Optional[Callable[[], bool]] = None):
+        """Simulate human-like typing into the active window."""
         if not text:
             return
 
-        print(f"Typing: {text}")
+        print(f"Typing (at ~{self.wpm} WPM): {text[:50]}...")
         try:
-            # Save current clipboard
-            old_clipboard = pyperclip.paste()
+            # WPM = Characters Per Minute (assuming 5 chars per word)
+            # 60 seconds / (WPM * 5) characters = seconds per character
+            base_char_delay = 60.0 / (float(self.wpm) * 5.0) 
             
-            # Copy new text
-            pyperclip.copy(text)
+            import random
             
-            # Small delay to ensure clipboard is updated
-            time.sleep(0.1) 
-            
-            # Press Ctrl+V
-            with self.keyboard.pressed(Key.ctrl):
-                self.keyboard.press('v')
-                self.keyboard.release('v')
+            for i, char in enumerate(text):
+                # Check for cancellation
+                if stop_event and stop_event.is_set():
+                    print("Typing cancelled via stop event.")
+                    return
                 
-            # Wait for paste to complete
-            time.sleep(0.1)
-            
-            # Restore clipboard (optional, generally polite but can be race-condition prone)
-            # pyperclip.copy(old_clipboard) 
-            
-        except Exception as e:
-            print(f"Error processing text output: {e}")
-            # Fallback to key-by-key if clipboard fails
-            print("Falling back to simulated typing...")
-            for char in text:
+                if check_focus and not check_focus():
+                    print("Typing stopped: window focus lost.")
+                    return
+
                 self.keyboard.type(char)
-                time.sleep(0.005)
+                
+                # Base delay with jitter (70% - 130% of base)
+                delay = base_char_delay * random.uniform(0.7, 1.3)
+                
+                # Slower after punctuation
+                if char in ".!?":
+                    delay += random.uniform(0.3, 0.6)
+                elif char in ",;:":
+                    delay += random.uniform(0.1, 0.3)
+                
+                time.sleep(delay)
+                
+                # Extra random pauses for detection avoidance (every 15-30 chars)
+                if i > 0 and i % random.randint(15, 30) == 0:
+                    long_pause = random.uniform(0.2, 0.8)
+                    time.sleep(long_pause)
+                    
+        except Exception as e:
+            print(f"Error during simulated typing: {e}")
+            # Emergency fallback removed to respect cancellation/focus rules

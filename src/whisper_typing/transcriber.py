@@ -1,7 +1,9 @@
 import torch
 import numpy as np
+import os
+os.environ["TRANSFORMERS_VERBOSITY"] = "error" #stop warning or informational messages
+os.environ["TRANSFORMERS_NO_ADVISORY_WARNINGS"] = "1" #stop warning or informational messages
 from transformers import pipeline
-
 
 class Transcriber:
     def __init__(self, model_id="openai/whisper-base", language=None, device="cpu"):

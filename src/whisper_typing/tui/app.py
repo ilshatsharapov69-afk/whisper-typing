@@ -1,10 +1,14 @@
 from textual import work
 from textual.app import App, ComposeResult
 from textual.containers import Container, Vertical, Horizontal
-from textual.widgets import Header, Footer, Static, Log, Label, Button
+from textual.widgets import Header, Footer, Static, RichLog, Label, Button
 from textual.binding import Binding
 from textual.reactive import reactive
 from textual.screen import Screen
+from rich.text import Text
+import difflib
+from datetime import datetime
+from typing import Optional
 
 from ..app_controller import WhisperAppController
 from .screens import ConfigurationScreen
@@ -72,15 +76,17 @@ class WhisperTui(App):
         
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
-        yield Footer()
+        
 
         yield Container(
             Static(self.preview_text, id="preview_area"),
             Label(self.status_message, id="status_bar"),
             Label(self.shortcuts_text, id="shortcuts_info"), 
-            Log(id="log_area"),
+            RichLog(id="log_area", markup=True, highlight=True),
             id="main_container"
         )
+
+        yield Footer()
 
     def on_mount(self) -> None:
         self.title = "Whisper Typing"
@@ -119,8 +125,16 @@ class WhisperTui(App):
             pass
 
     def write_log(self, message: str) -> None:
-        log_widget = self.query_one("#log_area", Log)
-        log_widget.write_line(message)
+        log_widget = self.query_one("#log_area", RichLog)
+        
+        # Truncate long messages for the log view only
+        display_message = message
+        if len(message) > 150:
+            display_message = message[:147] + "..."
+            
+        timestamp = datetime.now().strftime("%H:%M:%S")
+        # Using markup for colorized timestamp
+        log_widget.write(f"[bold blue][{timestamp}][/bold blue] {display_message}")
 
     def update_status(self, status: str) -> None:
         self.status_message = status
@@ -140,12 +154,39 @@ class WhisperTui(App):
         except Exception:
             pass # Widget might not be mounted yet
 
-    def update_preview(self, text: str) -> None:
-        self.preview_text = text if text else "..."
+    def update_preview(self, text: str, original_text: Optional[str] = None) -> None:
         try:
-            self.query_one("#preview_area", Static).update(self.preview_text)
-        except Exception:
-            pass
+            preview_widget = self.query_one("#preview_area", Static)
+            
+            if not text:
+                preview_widget.update("...")
+                return
+
+            if original_text is None or original_text == text:
+                preview_widget.update(text)
+                return
+
+            # Visual Diff Logic
+            diff_text = Text()
+            # Split by words for a better diff granularity
+            words1 = original_text.split()
+            words2 = text.split()
+            
+            s = difflib.SequenceMatcher(None, words1, words2)
+            for tag, i1, i2, j1, j2 in s.get_opcodes():
+                if tag == 'equal':
+                    diff_text.append(" ".join(words1[i1:i2]) + " ")
+                elif tag == 'replace':
+                    diff_text.append(" ".join(words1[i1:i2]) + " ", style="red strike")
+                    diff_text.append(" ".join(words2[j1:j2]) + " ", style="bold green")
+                elif tag == 'delete':
+                    diff_text.append(" ".join(words1[i1:i2]) + " ", style="red strike")
+                elif tag == 'insert':
+                    diff_text.append(" ".join(words2[j1:j2]) + " ", style="bold green")
+            
+            preview_widget.update(diff_text)
+        except Exception as e:
+            self.write_log(f"Preview error: {e}")
 
     def action_reload(self):
         self.write_log("Reloading configuration...")

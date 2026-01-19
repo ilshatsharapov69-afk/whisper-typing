@@ -23,7 +23,9 @@ DEFAULT_CONFIG = {
     "gemini_prompt": None,
     "microphone_name": None,
     "gemini_model": None,
-    "device": "cpu"
+    "device": "cpu",
+    "debug": False,
+    "typing_wpm": 40
 }
 
 def load_config(config_path: str = "config.json") -> Dict[str, Any]:
@@ -73,7 +75,7 @@ class WhisperAppController:
         # Callbacks for UI updates
         self.on_status_change: Optional[Callable[[str], None]] = None
         self.on_log: Optional[Callable[[str], None]] = None
-        self.on_preview_update: Optional[Callable[[str], None]] = None
+        self.on_preview_update: Optional[Callable[[str, Optional[str]], None]] = None
 
     def log(self, message: str):
         if self.on_log:
@@ -161,8 +163,13 @@ class WhisperAppController:
             
             # Recreate recorder with specific device
             self.recorder = AudioRecorder(device_index=self.current_mic_index)
-            self.typer = Typer()
-            self.improver = AIImprover(api_key=self.config["gemini_api_key"], model_name=self.config.get("gemini_model"))
+            self.typer = Typer(wpm=self.config.get("typing_wpm", 40))
+            self.improver = AIImprover(
+                api_key=self.config["gemini_api_key"], 
+                model_name=self.config.get("gemini_model") or "gemini-1.5-flash",
+                debug=self.config.get("debug", False),
+                logger=self.log
+            )
             
             self.log("Components initialized.")
             return True
@@ -224,7 +231,7 @@ class WhisperAppController:
                             self.pending_text = text
                             self.log(f"Transcribed: {text}")
                             if self.on_preview_update:
-                                self.on_preview_update(text)
+                                self.on_preview_update(text, None)
                             self.set_status("Text Ready")
                         else:
                             self.log("No text transcribed.")
@@ -245,7 +252,7 @@ class WhisperAppController:
             
             self.pending_text = None 
             if self.on_preview_update:
-                self.on_preview_update("") # Clear preview
+                self.on_preview_update("", None) # Clear preview
             
             self.recorder.start()
             self.set_status("Recording")
@@ -254,21 +261,56 @@ class WhisperAppController:
     def on_type_confirm(self):
         if self.paused: return
 
-        if self.pending_text:
-            self.log("Typing text...")
-            # Restore focus if we have a handle
-            if self.window_manager and self.target_window_handle:
-                if not self.window_manager.focus_window(self.target_window_handle):
-                    self.log("Failed to restore focus.")
-                    return 
-                time.sleep(0.1) 
+        # If already typing, signal to stop
+        if hasattr(self, "_is_typing") and self._is_typing:
+            self.log("Stopping typing simulation...")
+            if hasattr(self, "typing_stop_event"):
+                self.typing_stop_event.set()
+            return
 
-            self.typer.type_text(self.pending_text)
-            self.pending_text = None
-            if self.on_preview_update:
-                self.on_preview_update("")
-            self.log("Typed.")
-            self.set_status("Ready")
+        if self.pending_text:
+            text_to_type = self.pending_text
+            # Note: We no longer clear self.pending_text or preview here
+            
+            if not hasattr(self, "typing_stop_event"):
+                self.typing_stop_event = threading.Event()
+            self.typing_stop_event.clear()
+            self._is_typing = True
+            
+            def _check_focus():
+                if not self.window_manager or not self.target_window_handle:
+                    return True # Can't check
+                    
+                # pygetwindow objects can be compared directly if they are the same handle
+                active = self.window_manager.get_active_window()
+                if active and hasattr(active, '_hWnd') and hasattr(self.target_window_handle, '_hWnd'):
+                    return active._hWnd == self.target_window_handle._hWnd
+                return active == self.target_window_handle
+
+            def _async_typing():
+                try:
+                    if self.window_manager and self.target_window_handle:
+                        if not self.window_manager.focus_window(self.target_window_handle):
+                            self.log("Failed to restore focus.")
+                            self._is_typing = False
+                            return 
+                        time.sleep(0.3) 
+
+                    self.typer.type_text(
+                        text_to_type, 
+                        stop_event=self.typing_stop_event,
+                        check_focus=_check_focus
+                    )
+                    
+                    if self.typing_stop_event.is_set():
+                        self.log("Typing stopped.")
+                    else:
+                        self.log("Typing finished.")
+                finally:
+                    self._is_typing = False
+                    self.set_status("Ready")
+
+            threading.Thread(target=_async_typing, daemon=True).start()
         else:
             self.log("No text to type.")
 
@@ -283,13 +325,14 @@ class WhisperAppController:
             self.log("Requesting AI improvement...")
             def run_improve():
                 try:
+                    original_text = self.pending_text
                     prompt_template = self.config.get("gemini_prompt")
-                    improved = self.improver.improve_text(self.pending_text, prompt_template=prompt_template)
+                    improved = self.improver.improve_text(original_text, prompt_template=prompt_template)
                     if improved:
                         self.pending_text = improved
                         self.log("AI Improvement applied.")
                         if self.on_preview_update:
-                            self.on_preview_update(improved)
+                            self.on_preview_update(improved, original_text)
                         self.set_status("Text Ready (Improved)")
                 except Exception as e:
                    self.log(f"AI Error: {e}")

@@ -1,8 +1,10 @@
 from textual.app import ComposeResult
 from textual.containers import Container, Vertical, Horizontal, Grid
 from textual.screen import ModalScreen, Screen
-from textual.widgets import Header, Footer, Button, Label, Input, Select, Static
+from textual.widgets import Header, Footer, Button, Label, Input, Select, Static, Checkbox
 from textual.binding import Binding
+
+from ..ai_improver import AIImprover
 
 class ConfigurationScreen(Screen):
     CSS = """
@@ -79,7 +81,7 @@ class ConfigurationScreen(Screen):
         start_value = None
         if current_mic:
             # Find index for name
-            for name, idx in devices:
+            for idx, name in devices:
                 if name == current_mic:
                     start_value = idx
                     break
@@ -99,6 +101,27 @@ class ConfigurationScreen(Screen):
             ("CPU", "cpu"),
             ("GPU (CUDA)", "cuda"),
         ]
+
+        # Gemini Models
+        gemini_api_key = config.get("gemini_api_key")
+        gemini_models = []
+        if gemini_api_key:
+            model_ids = AIImprover.list_models(gemini_api_key)
+            # model_ids are like 'models/gemini-1.5-flash'
+            gemini_models = [(m.split('/')[-1], m) for m in model_ids]
+        
+        if not gemini_models:
+            # Fallback models if API call fails or no key
+            gemini_models = [
+                ("Gemini 1.5 Flash", "models/gemini-1.5-flash"),
+                ("Gemini 1.5 Pro", "models/gemini-1.5-pro"),
+                ("Gemini 2.0 Flash", "models/gemini-2.0-flash"),
+            ]
+        
+        current_gemini_model = config.get("gemini_model") or "models/gemini-1.5-flash"
+        # Ensure current model is in options so Select doesn't crash
+        if current_gemini_model and not any(m[1] == current_gemini_model for m in gemini_models):
+            gemini_models.append((current_gemini_model.split('/')[-1], current_gemini_model))
         
         yield Container(
             Label("Configuration", id="title"),
@@ -114,12 +137,22 @@ class ConfigurationScreen(Screen):
             
             Label("Gemini API Key:"),
             Input(value=config.get("gemini_api_key") or "", password=True, id="api_key_input"),
+
+            Label("Gemini Model:"),
+            Select(gemini_models, value=current_gemini_model, id="gemini_model_select"),
             
             Label("Record Hotkey:"),
             Input(value=config.get("hotkey"), id="hotkey_input"),
             
             Label("Type Hotkey:"),
             Input(value=config.get("type_hotkey"), id="type_hotkey_input"),
+            
+                      
+            Label("Typing Speed (WPM):"),
+            Input(value=str(config.get("typing_wpm", 40)), id="typing_wpm_input"),
+
+            Label("Debug Mode:"),
+            Checkbox(value=config.get("debug", False), id="debug_checkbox"),
             
             Horizontal(
                 Button("Save", variant="primary", id="save_btn"),
@@ -146,26 +179,48 @@ class ConfigurationScreen(Screen):
         api_input = self.query_one("#api_key_input", Input)
         hotkey_input = self.query_one("#hotkey_input", Input)
         type_input = self.query_one("#type_hotkey_input", Input)
+        gemini_model_select = self.query_one("#gemini_model_select", Select)
+        debug_checkbox = self.query_one("#debug_checkbox", Checkbox)
+        typing_wpm_input = self.query_one("#typing_wpm_input", Input)
         
+        try:
+            typing_wpm = int(typing_wpm_input.value)
+        except ValueError:
+            typing_wpm = 40
+
         new_config = {
-            "microphone_name": None, # Resolve logic below
+            "microphone_name": None, 
             "model": model_select.value,
             "device": device_select.value,
             "gemini_api_key": api_input.value,
+            "gemini_model": gemini_model_select.value,
+            "debug": debug_checkbox.value,
             "hotkey": hotkey_input.value,
-            "type_hotkey": type_input.value
+            "type_hotkey": type_input.value,
+            "typing_wpm": typing_wpm
         }
         
         # Handle Microphone Name
-        # value is the index or None
         mic_idx = mic_select.value
         if mic_idx is not None:
-             # Re-fetch devices to find name by index since we can't reliably access Select options map
              devices = self.controller.list_input_devices()
              for idx, name in devices:
                  if idx == mic_idx:
                      new_config["microphone_name"] = name
                      break
         
-        self.controller.update_config(new_config)
-        self.dismiss(True) # Return True to indicate save
+        # Change detection
+        current_config = self.controller.config
+        has_changes = False
+        
+        # We check keys that are in new_config
+        for key, value in new_config.items():
+            if current_config.get(key) != value:
+                has_changes = True
+                break
+        
+        if has_changes:
+            self.controller.update_config(new_config)
+            self.dismiss(True) # Return True to indicate save and reload
+        else:
+            self.dismiss(False) # Return False to indicate no changes
