@@ -41,7 +41,6 @@ class AIImprover:
             return ""
 
         print(f"Improving text with Gemini ({self.model_name})...")
-        print(f"Prompt template length: {len(prompt_template) if prompt_template else 0}")
         try:
             if not prompt_template:
                 prompt = (
@@ -56,7 +55,6 @@ class AIImprover:
 
             response = self.model.generate_content(prompt)
             improved_text = response.text.strip()
-            print(f"Improved text: {improved_text}")
             return improved_text
         except Exception as e:
             print(f"Error during AI improvement: {e}")

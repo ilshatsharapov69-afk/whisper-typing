@@ -43,5 +43,4 @@ class Transcriber:
         )
         
         text = result["text"].strip()
-        print(f"Transcription: {text}")
         return text
