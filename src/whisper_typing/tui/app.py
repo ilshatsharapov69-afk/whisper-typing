@@ -7,6 +7,7 @@ from textual.reactive import reactive
 from textual.screen import Screen
 
 from ..app_controller import WhisperAppController
+from .screens import ConfigurationScreen
 
 class WhisperTui(App):
     # ... (CSS same as before) ...
@@ -48,7 +49,7 @@ class WhisperTui(App):
     BINDINGS = [
         Binding("q", "quit", "Quit"),
         Binding("p", "pause", "Pause"),
-        Binding("c", "configure", "Configure"), # Placeholder for now
+        Binding("c", "configure", "Configure"),
         Binding("r", "reload", "Reload Config"),
     ]
 
@@ -131,6 +132,21 @@ class WhisperTui(App):
         self.controller.stop()
         self.controller.load_configuration()
         self.startup_controller()
+
+    @work
+    async def action_configure(self):
+        self.controller.stop() # Pause listener while configuring
+        # Need to re-start listener if they cancel? Yes.
+        
+        screen = ConfigurationScreen(self.controller)
+        result = await self.push_screen_wait(screen)
+        
+        if result:
+            self.write_log("Settings updated. Reloading components...")
+            self.startup_controller() # Will re-init and start listener
+        else:
+             self.write_log("Configuration cancelled.")
+             self.controller.start_listener() # Restart listener
 
     def action_pause(self):
         self.controller.toggle_pause()

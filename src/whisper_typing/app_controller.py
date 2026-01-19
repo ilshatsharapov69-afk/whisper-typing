@@ -118,6 +118,16 @@ class WhisperAppController:
                  return i
         return None
 
+    def list_input_devices(self):
+        """Wrapper to list devices."""
+        return AudioRecorder.list_devices()
+
+    def update_config(self, new_config: Dict[str, Any]):
+        """Update runtime config and save to file."""
+        self.config.update(new_config)
+        save_config(self.config)
+        self.log("Configuration saved.")
+
     def initialize_components(self) -> bool:
         """Initialize or re-initialize components."""
         self.log("Initializing components...")
