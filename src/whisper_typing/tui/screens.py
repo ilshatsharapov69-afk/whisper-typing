@@ -4,6 +4,8 @@ from textual.screen import ModalScreen, Screen
 from textual.widgets import Header, Footer, Button, Label, Input, Select, Static
 from textual.binding import Binding
 
+from ..ai_improver import AIImprover
+
 class ConfigurationScreen(Screen):
     CSS = """
     ConfigurationScreen {
@@ -99,6 +101,27 @@ class ConfigurationScreen(Screen):
             ("CPU", "cpu"),
             ("GPU (CUDA)", "cuda"),
         ]
+
+        # Gemini Models
+        gemini_api_key = config.get("gemini_api_key")
+        gemini_models = []
+        if gemini_api_key:
+            model_ids = AIImprover.list_models(gemini_api_key)
+            # model_ids are like 'models/gemini-1.5-flash'
+            gemini_models = [(m.split('/')[-1], m) for m in model_ids]
+        
+        if not gemini_models:
+            # Fallback models if API call fails or no key
+            gemini_models = [
+                ("Gemini 1.5 Flash", "models/gemini-1.5-flash"),
+                ("Gemini 1.5 Pro", "models/gemini-1.5-pro"),
+                ("Gemini 2.0 Flash", "models/gemini-2.0-flash"),
+            ]
+        
+        current_gemini_model = config.get("gemini_model") or "models/gemini-1.5-flash"
+        # Ensure current model is in options so Select doesn't crash
+        if current_gemini_model and not any(m[1] == current_gemini_model for m in gemini_models):
+            gemini_models.append((current_gemini_model.split('/')[-1], current_gemini_model))
         
         yield Container(
             Label("Configuration", id="title"),
@@ -120,6 +143,9 @@ class ConfigurationScreen(Screen):
             
             Label("Type Hotkey:"),
             Input(value=config.get("type_hotkey"), id="type_hotkey_input"),
+            
+            Label("Gemini Model:"),
+            Select(gemini_models, value=current_gemini_model, id="gemini_model_select"),
             
             Horizontal(
                 Button("Save", variant="primary", id="save_btn"),
@@ -146,12 +172,14 @@ class ConfigurationScreen(Screen):
         api_input = self.query_one("#api_key_input", Input)
         hotkey_input = self.query_one("#hotkey_input", Input)
         type_input = self.query_one("#type_hotkey_input", Input)
+        gemini_model_select = self.query_one("#gemini_model_select", Select)
         
         new_config = {
             "microphone_name": None, # Resolve logic below
             "model": model_select.value,
             "device": device_select.value,
             "gemini_api_key": api_input.value,
+            "gemini_model": gemini_model_select.value,
             "hotkey": hotkey_input.value,
             "type_hotkey": type_input.value
         }
