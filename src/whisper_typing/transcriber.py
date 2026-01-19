@@ -1,4 +1,5 @@
 import torch
+import numpy as np
 from transformers import pipeline
 
 
@@ -19,16 +20,17 @@ class Transcriber:
             device=device,
         )
 
-    def transcribe(self, audio_path: str) -> str:
-        """Transcribe audio file to text."""
-        print(f"Transcribing {audio_path}...")
+    def transcribe(self, audio_input: "str | np.ndarray") -> str:
+        """Transcribe audio input (file path or numpy array) to text."""
+        input_type = "buffer" if issubclass(type(audio_input), (np.ndarray,)) else str(audio_input)
+        print(f"Transcribing {input_type}...")
         
         generate_kwargs = {}
         if self.language:
             generate_kwargs["language"] = self.language
 
         result = self.pipe(
-            audio_path,
+            audio_input,
             chunk_length_s=30,
             batch_size=8, # increased batch size for better GPU utilization
             generate_kwargs=generate_kwargs,

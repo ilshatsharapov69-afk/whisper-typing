@@ -1,7 +1,6 @@
 import queue
-import tempfile
 import threading
-import wave
+
 from datetime import datetime
 
 import numpy as np
@@ -43,8 +42,8 @@ class AudioRecorder:
         self.thread.start()
         print("Recording started...")
 
-    def stop(self) -> str:
-        """Stop recording and save to a temporary WAV file. Returns file path."""
+    def stop(self) -> np.ndarray:
+        """Stop recording and return audio data as numpy array (float32)."""
         if not self.recording:
             return None
 
@@ -59,19 +58,10 @@ class AudioRecorder:
         if not data:
             return None
             
+        # Concatenate and flatten to 1D array for mono
         recording = np.concatenate(data, axis=0)
-        
-        # Save to temp file
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        temp_filename = tempfile.mktemp(prefix=f"whisper_audio_{timestamp}_", suffix=".wav")
-        
-        with wave.open(temp_filename, 'wb') as wf:
-            wf.setnchannels(self.channels)
-            wf.setsampwidth(2) # 16-bit
-            wf.setframerate(self.sample_rate)
-            # Convert float32 to int16
-            audio_int16 = (recording * 32767).astype(np.int16)
-            wf.writeframes(audio_int16.tobytes())
+        if self.channels == 1:
+            recording = recording.flatten()
             
-        print(f"Recording stopped. Saved to {temp_filename}")
-        return temp_filename
+        print(f"Recording stopped. Captured {len(recording)} samples.")
+        return recording

@@ -135,13 +135,13 @@ class WhisperTypingApp:
 
         if self.recorder.recording:
             print("\nStopping recording...")
-            audio_path = self.recorder.stop()
+            audio_data = self.recorder.stop()
             
-            if audio_path:
+            if audio_data is not None:
                 self.is_processing = True
                 def process_audio():
                     try:
-                        text = self.transcriber.transcribe(audio_path)
+                        text = self.transcriber.transcribe(audio_data)
                         if text:
                             self.pending_text = text
                             print(f"\n[PREVIEW] Transcribed text: \"{text}\"")
@@ -154,7 +154,7 @@ class WhisperTypingApp:
                         self.is_processing = False
                 threading.Thread(target=process_audio).start()
             else:
-                print("No audio recorded.")
+                print("No audio recorded (empty buffer).")
         else:
             self.pending_text = None 
             self.recorder.start()
