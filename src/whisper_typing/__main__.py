@@ -12,6 +12,7 @@ from .transcriber import Transcriber
 from .typer import Typer
 from .ai_improver import AIImprover
 from .window_manager import WindowManager
+import torch
 
 DEFAULT_CONFIG = {
     "hotkey": "<f8>",
@@ -22,7 +23,8 @@ DEFAULT_CONFIG = {
     "gemini_api_key": "",
     "gemini_prompt": None,
     "microphone_name": None,
-    "gemini_model": None
+    "gemini_model": None,
+    "device": "cpu"
 }
 
 def load_config(config_path: str = "config.json") -> Dict[str, Any]:
@@ -67,6 +69,7 @@ class WhisperTypingApp:
         self.current_model_id = None
         self.current_language = None
         self.current_mic_index = None
+        self.current_device = None
         
     def load_configuration(self, args):
         """Load and merge configuration."""
@@ -168,6 +171,39 @@ class WhisperTypingApp:
             except ValueError:
                 print("Invalid input.")
 
+    def select_device(self):
+        """Interactive device selection."""
+        print("\nSelect Processing Device:")
+        print("1: cpu")
+        
+        has_cuda = torch.cuda.is_available()
+        if has_cuda:
+            print("2: cuda (GPU)")
+        else:
+            print("2: cuda (GPU) [Not Available]")
+            
+        print("c: Cancel")
+        
+        while True:
+            choice = input("Select option: ").strip().lower()
+            if choice == 'c':
+                return None
+            elif choice == '1':
+                self.config["device"] = "cpu"
+                print("Selected: cpu")
+                save_config(self.config)
+                return "cpu"
+            elif choice == '2':
+                if has_cuda:
+                    self.config["device"] = "cuda"
+                    print("Selected: cuda")
+                    save_config(self.config)
+                    return "cuda"
+                else:
+                    print("CUDA is not available on this system.")
+            else:
+                print("Invalid option.")
+
     def initialize_components(self):
         """Initialize or re-initialize components."""
         print(f"Initializing Whisper Typing...")
@@ -175,6 +211,7 @@ class WhisperTypingApp:
         print(f"Type Hotkey:    {self.config['type_hotkey']}")
         print(f"Improve Hotkey: {self.config['improve_hotkey']}")
         print(f"Model:          {self.config['model']}")
+        print(f"Device:         {self.config.get('device', 'cpu')}")
         print(f"AI Enabled:     {'Yes' if self.config['gemini_api_key'] else 'No'}")
 
         # Microphone Setup
@@ -207,12 +244,19 @@ class WhisperTypingApp:
             # Reload Optimization: Check if model/language changed
             if (not self.transcriber or 
                 self.current_model_id != self.config["model"] or 
-                self.current_language != self.config["language"]):
+                self.current_language != self.config["language"] or
+                self.current_device != self.config.get("device", "cpu")):
                 
                 print("Loading Transcriber pipeline...")
-                self.transcriber = Transcriber(model_id=self.config["model"], language=self.config["language"])
+                device = self.config.get("device", "cpu")
+                self.transcriber = Transcriber(
+                    model_id=self.config["model"], 
+                    language=self.config["language"],
+                    device=device
+                )
                 self.current_model_id = self.config["model"]
                 self.current_language = self.config["language"]
+                self.current_device = device
             else:
                 print("Transcriber configuration unchanged, keeping existing model.")
             
@@ -377,6 +421,7 @@ def main() -> None:
                 print("\nConfiguration:")
                 print("m: Change Microphone")
                 print("g: Change Gemini Model")
+                print("d: Change Device")
                 print("c: Cancel")
                 choice = input("Select option: ").strip().lower()
                 
@@ -388,6 +433,11 @@ def main() -> None:
                 elif choice == 'g':
                     app.stop()
                     app.select_gemini_model()
+                    if app.initialize_components():
+                        app.start_listener()
+                elif choice == 'd':
+                    app.stop()
+                    app.select_device()
                     if app.initialize_components():
                         app.start_listener()
                 elif choice == 'c':
