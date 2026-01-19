@@ -1,3 +1,4 @@
+from textual import work
 from textual.app import App, ComposeResult
 from textual.containers import Container, Vertical, Horizontal
 from textual.widgets import Header, Footer, Static, Log, Label, Button
@@ -8,6 +9,7 @@ from textual.screen import Screen
 from ..app_controller import WhisperAppController
 
 class WhisperTui(App):
+    # ... (CSS same as before) ...
     CSS = """
     Screen {
         layout: vertical;
@@ -77,11 +79,10 @@ class WhisperTui(App):
         self.controller.on_status_change = self.update_status
         self.controller.on_preview_update = self.update_preview
         
-        # Initialize Controller (this might take a moment, maybe run in worker?)
-        # For now, run directly, but in real app better to be async if slow.
-        # But initialize_components loads models, so it IS slow.
-        self.run_worker(self.startup_controller, exclusive=True, thread=True)
+        # Initialize Controller
+        self.startup_controller()
 
+    @work(exclusive=True, thread=True)
     def startup_controller(self):
         self.write_log("Loading models... (this may take a few seconds)")
         self.update_status("Loading...")
@@ -126,7 +127,7 @@ class WhisperTui(App):
         self.write_log("Reloading configuration...")
         self.controller.stop()
         self.controller.load_configuration()
-        self.run_worker(self.startup_controller)
+        self.startup_controller()
 
     def action_quit(self):
         self.controller.stop()
