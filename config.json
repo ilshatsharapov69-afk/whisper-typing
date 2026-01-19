@@ -8,5 +8,5 @@
     "gemini_prompt": "Refine and correct the following transcribed text. Consider fixing the text due to mispronunciation, improve grammar, punctuation and clarity. Output ONLY the refined text, nothing else.\\n\\nText: {text}",
     "microphone_name": "Microphone (USB Condenser Micro",
     "gemini_model": "models/gemini-2.5-flash",
-    "device": "cuda"
+    "device": "cpu"
 }
