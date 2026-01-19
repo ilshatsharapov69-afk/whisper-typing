@@ -1,8 +1,8 @@
-from pynput.keyboard import Controller, Key
+import threading
 import time
 import pyperclip
-import threading
 from typing import Optional, Callable
+from pynput.keyboard import Controller, Key
 
 class Typer:
     def __init__(self, wpm: int = 40):

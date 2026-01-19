@@ -124,9 +124,15 @@ class WhisperTui(App):
 
     def write_log(self, message: str) -> None:
         log_widget = self.query_one("#log_area", RichLog)
+        
+        # Truncate long messages for the log view only
+        display_message = message
+        if len(message) > 150:
+            display_message = message[:147] + "..."
+            
         timestamp = datetime.now().strftime("%H:%M:%S")
         # Using markup for colorized timestamp
-        log_widget.write(f"[bold blue][{timestamp}][/bold blue] {message}")
+        log_widget.write(f"[bold blue][{timestamp}][/bold blue] {display_message}")
 
     def update_status(self, status: str) -> None:
         self.status_message = status
