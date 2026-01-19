@@ -15,7 +15,8 @@ class ConfigurationScreen(Screen):
         grid-gutter: 1 2;
         grid-rows: auto;
         padding: 0 1;
-        width: 60;
+        width: 90%;
+        max-width: 120;
         height: auto;
         border: thick $background 80%;
         background: $surface;
@@ -92,6 +93,12 @@ class ConfigurationScreen(Screen):
             ("Large v3", "openai/whisper-large-v3"),
             ("Large v3 Turbo", "openai/whisper-large-v3-turbo"),
         ]
+
+        # Device Selection
+        device_options = [
+            ("CPU", "cpu"),
+            ("GPU (CUDA)", "cuda"),
+        ]
         
         yield Container(
             Label("Configuration", id="title"),
@@ -101,6 +108,9 @@ class ConfigurationScreen(Screen):
             
             Label("Whisper Model:"),
             Select(model_options, value=config.get("model"), id="model_select"),
+
+            Label("Device:"),
+            Select(device_options, value=config.get("device", "cpu"), id="device_select"),
             
             Label("Gemini API Key:"),
             Input(value=config.get("gemini_api_key") or "", password=True, id="api_key_input"),
@@ -132,6 +142,7 @@ class ConfigurationScreen(Screen):
         # Gather values
         mic_select = self.query_one("#mic_select", Select)
         model_select = self.query_one("#model_select", Select)
+        device_select = self.query_one("#device_select", Select)
         api_input = self.query_one("#api_key_input", Input)
         hotkey_input = self.query_one("#hotkey_input", Input)
         type_input = self.query_one("#type_hotkey_input", Input)
@@ -139,6 +150,7 @@ class ConfigurationScreen(Screen):
         new_config = {
             "microphone_name": None, # Resolve logic below
             "model": model_select.value,
+            "device": device_select.value,
             "gemini_api_key": api_input.value,
             "hotkey": hotkey_input.value,
             "type_hotkey": type_input.value
@@ -148,13 +160,11 @@ class ConfigurationScreen(Screen):
         # value is the index or None
         mic_idx = mic_select.value
         if mic_idx is not None:
-             # Find name from index
-             mic_name = mic_select.get_option_at_index(mic_select.items.index((mic_select.prompt, mic_idx)) if mic_select.value != Select.BLANK else 0)[0]
-             # Actually, Select options are (label, value).
-             # We need to find the label corresponding to this value
-             for label, value in mic_select._options:
-                 if value == mic_idx:
-                     new_config["microphone_name"] = label
+             # Re-fetch devices to find name by index since we can't reliably access Select options map
+             devices = self.controller.list_input_devices()
+             for idx, name in devices:
+                 if idx == mic_idx:
+                     new_config["microphone_name"] = name
                      break
         
         self.controller.update_config(new_config)
