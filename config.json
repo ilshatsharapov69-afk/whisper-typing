@@ -2,7 +2,7 @@
     "hotkey": "<f8>",
     "type_hotkey": "<f9>",
     "improve_hotkey": "<f10>",
-    "model": "openai/whisper-large-v3-turbo",
+    "model": "openai/whisper-tiny",
     "language": "en",
     "gemini_api_key": "AIzaSyCwjS-D0Adls8-DJeVBa5gHoIL2_VDbugg",
     "gemini_prompt": "Refine and correct the following transcribed text. Consider fixing the text due to mispronunciation, improve grammar, punctuation and clarity. Output ONLY the refined text, nothing else.\\n\\nText: {text}",
