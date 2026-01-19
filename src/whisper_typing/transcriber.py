@@ -32,7 +32,8 @@ class Transcriber:
             chunk_length_s=30,
             batch_size=8, # increased batch size for better GPU utilization
             generate_kwargs=generate_kwargs,
-            return_timestamps=True
+            return_timestamps=True,
+            ignore_warning=True
         )
         
         text = result["text"].strip()
