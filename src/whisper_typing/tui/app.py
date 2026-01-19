@@ -49,7 +49,7 @@ class WhisperTui(App):
         Binding("r", "reload", "Reload Config"),
     ]
 
-    status_message = reactive("Initializing...")
+    status_message = reactive("Starting...")
     preview_text = reactive("Ready to record...")
 
     def __init__(self, controller: WhisperAppController):
@@ -83,7 +83,8 @@ class WhisperTui(App):
         self.run_worker(self.startup_controller, exclusive=True, thread=True)
 
     def startup_controller(self):
-        self.update_status("Loading models...")
+        self.write_log("Loading models... (this may take a few seconds)")
+        self.update_status("Loading...")
         success = self.controller.initialize_components()
         if success:
             self.controller.start_listener()
@@ -101,17 +102,25 @@ class WhisperTui(App):
     def update_status(self, status: str) -> None:
         self.status_message = status
         # Update style based on status content (simple heuristic)
-        status_widget = self.query_one("#status_bar", Label)
-        status_widget.classes = "" # Reset
-        if "Recording" in status:
-            status_widget.add_class("status_recording")
-        elif "Processing" in status or "Loading" in status:
-            status_widget.add_class("status_processing")
-        else:
-            status_widget.add_class("status_ready")
+        try:
+            status_widget = self.query_one("#status_bar", Label)
+            status_widget.update(status)
+            status_widget.classes = "" # Reset
+            if "Recording" in status:
+                status_widget.add_class("status_recording")
+            elif "Processing" in status or "Loading" in status:
+                status_widget.add_class("status_processing")
+            else:
+                status_widget.add_class("status_ready")
+        except Exception:
+            pass # Widget might not be mounted yet
 
     def update_preview(self, text: str) -> None:
         self.preview_text = text if text else "..."
+        try:
+            self.query_one("#preview_area", Static).update(self.preview_text)
+        except Exception:
+            pass
 
     def action_reload(self):
         self.write_log("Reloading configuration...")
