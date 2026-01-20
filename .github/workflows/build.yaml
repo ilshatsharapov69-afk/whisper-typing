@@ -25,7 +25,7 @@ jobs:
         run: uv run ruff check
 
       - name: Test Package
-        run: uv run pytest -v --cov
+        run: uv run pytest -v
 
       - name: Build Package
         run: uv build

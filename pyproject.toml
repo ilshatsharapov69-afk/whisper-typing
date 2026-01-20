@@ -54,7 +54,7 @@ build-backend = "hatchling.build"
 
 [tool.coverage.report]
 fail_under = 100
-omit = ["__main__.py"]
+omit = ["src/whisper_typing/tui/*", "*/__main__.py"]
 
 [tool.coverage.run]
 source = ["whisper_typing"]

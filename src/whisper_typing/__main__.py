@@ -1,12 +1,18 @@
+"""Main entry point for whisper-typing."""
+
 import argparse
-import sys
+
 from dotenv import load_dotenv
 
-from .app_controller import WhisperAppController
-from .tui.app import WhisperTui
+from whisper_typing.app_controller import WhisperAppController
+from whisper_typing.tui.app import WhisperTui
+
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Whisper Typing - Background Speech to Text")
+    """Run the whisper-typing application."""
+    parser = argparse.ArgumentParser(
+        description="Whisper Typing - Background Speech to Text"
+    )
     parser.add_argument("--hotkey", help="Global hotkey to toggle recording")
     parser.add_argument("--type-hotkey", help="Global hotkey to type")
     parser.add_argument("--improve-hotkey", help="Global hotkey to improve text")
@@ -16,16 +22,16 @@ def main() -> None:
     args = parser.parse_args()
 
     load_dotenv(override=True)
-    
+
     # Initialize Controller
     controller = WhisperAppController()
     controller.load_configuration(args)
-    
+
     # Start TUI
     # The TUI will handle component initialization and starting the listener
     app = WhisperTui(controller)
     app.run()
 
+
 if __name__ == "__main__":
     main()
-

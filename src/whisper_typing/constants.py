@@ -1,7 +1,9 @@
-# Whisper Model Definitions
+"""Constants for the whisper-typing application."""
+
+from typing import Final
 
 # List for TUI options: (label, id)
-WHISPER_MODELS = [
+WHISPER_MODELS: Final[list[tuple[str, str]]] = [
     # Standard Multilingual
     ("Tiny (39M)", "openai/whisper-tiny"),
     ("Base (74M)", "openai/whisper-base"),
@@ -25,7 +27,7 @@ WHISPER_MODELS = [
 ]
 
 # Map HF model IDs to faster-whisper names
-WHISPER_NAME_MAP = {
+WHISPER_NAME_MAP: Final[dict[str, str]] = {
     # Standard Multilingual
     "openai/whisper-tiny": "tiny",
     "openai/whisper-base": "base",

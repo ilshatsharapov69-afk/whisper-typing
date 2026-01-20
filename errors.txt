@@ -1,0 +1,353 @@
+UP043 [*] Unnecessary default type arguments
+  --> tests\test_app_controller.py:14:28
+   |
+13 | @pytest.fixture
+14 | def mock_dependencies() -> Generator[dict[str, Any], None, None]:
+   |                            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+15 |     """Mock all external dependencies for the controller."""
+16 |     with (
+   |
+help: Remove default type arguments
+
+N806 Variable `MockRecorder` in function should be lowercase
+  --> tests\test_app_controller.py:17:65
+   |
+15 |     """Mock all external dependencies for the controller."""
+16 |     with (
+17 |         patch("whisper_typing.app_controller.AudioRecorder") as MockRecorder,
+   |                                                                 ^^^^^^^^^^^^
+18 |         patch("whisper_typing.app_controller.Transcriber") as MockTranscriber,
+19 |         patch("whisper_typing.app_controller.Typer") as MockTyper,
+   |
+
+N806 Variable `MockTranscriber` in function should be lowercase
+  --> tests\test_app_controller.py:18:63
+   |
+16 |     with (
+17 |         patch("whisper_typing.app_controller.AudioRecorder") as MockRecorder,
+18 |         patch("whisper_typing.app_controller.Transcriber") as MockTranscriber,
+   |                                                               ^^^^^^^^^^^^^^^
+19 |         patch("whisper_typing.app_controller.Typer") as MockTyper,
+20 |         patch("whisper_typing.app_controller.AIImprover") as MockImprover,
+   |
+
+N806 Variable `MockTyper` in function should be lowercase
+  --> tests\test_app_controller.py:19:57
+   |
+17 |         patch("whisper_typing.app_controller.AudioRecorder") as MockRecorder,
+18 |         patch("whisper_typing.app_controller.Transcriber") as MockTranscriber,
+19 |         patch("whisper_typing.app_controller.Typer") as MockTyper,
+   |                                                         ^^^^^^^^^
+20 |         patch("whisper_typing.app_controller.AIImprover") as MockImprover,
+21 |         patch("whisper_typing.app_controller.WindowManager") as MockWindowManager,
+   |
+
+N806 Variable `MockImprover` in function should be lowercase
+  --> tests\test_app_controller.py:20:62
+   |
+18 |         patch("whisper_typing.app_controller.Transcriber") as MockTranscriber,
+19 |         patch("whisper_typing.app_controller.Typer") as MockTyper,
+20 |         patch("whisper_typing.app_controller.AIImprover") as MockImprover,
+   |                                                              ^^^^^^^^^^^^
+21 |         patch("whisper_typing.app_controller.WindowManager") as MockWindowManager,
+22 |         patch("pynput.keyboard.GlobalHotKeys") as MockHotKeys,
+   |
+
+N806 Variable `MockWindowManager` in function should be lowercase
+  --> tests\test_app_controller.py:21:65
+   |
+19 |         patch("whisper_typing.app_controller.Typer") as MockTyper,
+20 |         patch("whisper_typing.app_controller.AIImprover") as MockImprover,
+21 |         patch("whisper_typing.app_controller.WindowManager") as MockWindowManager,
+   |                                                                 ^^^^^^^^^^^^^^^^^
+22 |         patch("pynput.keyboard.GlobalHotKeys") as MockHotKeys,
+23 |         patch("whisper_typing.app_controller.sd") as MockSD,
+   |
+
+N806 Variable `MockHotKeys` in function should be lowercase
+  --> tests\test_app_controller.py:22:51
+   |
+20 |         patch("whisper_typing.app_controller.AIImprover") as MockImprover,
+21 |         patch("whisper_typing.app_controller.WindowManager") as MockWindowManager,
+22 |         patch("pynput.keyboard.GlobalHotKeys") as MockHotKeys,
+   |                                                   ^^^^^^^^^^^
+23 |         patch("whisper_typing.app_controller.sd") as MockSD,
+24 |     ):
+   |
+
+N806 Variable `MockSD` in function should be lowercase
+  --> tests\test_app_controller.py:23:54
+   |
+21 |         patch("whisper_typing.app_controller.WindowManager") as MockWindowManager,
+22 |         patch("pynput.keyboard.GlobalHotKeys") as MockHotKeys,
+23 |         patch("whisper_typing.app_controller.sd") as MockSD,
+   |                                                      ^^^^^^
+24 |     ):
+25 |         yield {
+   |
+
+ANN001 Missing type annotation for function argument `mock_dependencies`
+  --> tests\test_app_controller.py:38:25
+   |
+38 | def test_initialization(mock_dependencies) -> None:
+   |                         ^^^^^^^^^^^^^^^^^
+39 |     """Test controller initialization."""
+40 |     controller = WhisperAppController()
+   |
+
+ARG001 Unused function argument: `mock_dependencies`
+  --> tests\test_app_controller.py:38:25
+   |
+38 | def test_initialization(mock_dependencies) -> None:
+   |                         ^^^^^^^^^^^^^^^^^
+39 |     """Test controller initialization."""
+40 |     controller = WhisperAppController()
+   |
+
+ANN001 Missing type annotation for function argument `mock_dependencies`
+  --> tests\test_app_controller.py:48:32
+   |
+48 | def test_initialize_components(mock_dependencies) -> None:
+   |                                ^^^^^^^^^^^^^^^^^
+49 |     """Test initializing components."""
+50 |     controller = WhisperAppController()
+   |
+
+ARG001 Unused function argument: `mock_dependencies`
+  --> tests\test_app_controller.py:48:32
+   |
+48 | def test_initialize_components(mock_dependencies) -> None:
+   |                                ^^^^^^^^^^^^^^^^^
+49 |     """Test initializing components."""
+50 |     controller = WhisperAppController()
+   |
+
+ANN001 Missing type annotation for function argument `mock_dependencies`
+  --> tests\test_app_controller.py:63:25
+   |
+63 | def test_start_listener(mock_dependencies) -> None:
+   |                         ^^^^^^^^^^^^^^^^^
+64 |     """Test starting the global hotkey listener."""
+65 |     controller = WhisperAppController()
+   |
+
+ANN001 Missing type annotation for function argument `mock_dependencies`
+  --> tests\test_app_controller.py:82:33
+   |
+82 | def test_on_record_toggle_start(mock_dependencies) -> None:
+   |                                 ^^^^^^^^^^^^^^^^^
+83 |     """Test starting recording."""
+84 |     controller = WhisperAppController()
+   |
+
+ARG001 Unused function argument: `mock_dependencies`
+  --> tests\test_app_controller.py:82:33
+   |
+82 | def test_on_record_toggle_start(mock_dependencies) -> None:
+   |                                 ^^^^^^^^^^^^^^^^^
+83 |     """Test starting recording."""
+84 |     controller = WhisperAppController()
+   |
+
+ANN001 Missing type annotation for function argument `mock_dependencies`
+   --> tests\test_app_controller.py:105:32
+    |
+105 | def test_on_record_toggle_stop(mock_dependencies) -> None:
+    |                                ^^^^^^^^^^^^^^^^^
+106 |     """Test stopping recording."""
+107 |     controller = WhisperAppController()
+    |
+
+ARG001 Unused function argument: `mock_dependencies`
+   --> tests\test_app_controller.py:105:32
+    |
+105 | def test_on_record_toggle_stop(mock_dependencies) -> None:
+    |                                ^^^^^^^^^^^^^^^^^
+106 |     """Test stopping recording."""
+107 |     controller = WhisperAppController()
+    |
+
+ANN001 Missing type annotation for function argument `mock_dependencies`
+   --> tests\test_app_controller.py:123:26
+    |
+123 | def test_on_type_confirm(mock_dependencies) -> None:
+    |                          ^^^^^^^^^^^^^^^^^
+124 |     """Test typing confirmation."""
+125 |     controller = WhisperAppController()
+    |
+
+ARG001 Unused function argument: `mock_dependencies`
+   --> tests\test_app_controller.py:123:26
+    |
+123 | def test_on_type_confirm(mock_dependencies) -> None:
+    |                          ^^^^^^^^^^^^^^^^^
+124 |     """Test typing confirmation."""
+125 |     controller = WhisperAppController()
+    |
+
+N806 Variable `MockThread` in function should be lowercase
+   --> tests\test_app_controller.py:134:39
+    |
+132 |     # Mock threading to run synchronously for test or just assert it was started
+133 |     # Here we simulate the logic inside the thread or check if thread started
+134 |     with patch("threading.Thread") as MockThread:
+    |                                       ^^^^^^^^^^
+135 |         controller.on_type_confirm()
+136 |         MockThread.assert_called_once()
+    |
+
+ANN001 Missing type annotation for function argument `mock_dependencies`
+   --> tests\test_app_controller.py:141:26
+    |
+141 | def test_on_improve_text(mock_dependencies) -> None:
+    |                          ^^^^^^^^^^^^^^^^^
+142 |     """Test AI improvement trigger."""
+143 |     controller = WhisperAppController()
+    |
+
+ARG001 Unused function argument: `mock_dependencies`
+   --> tests\test_app_controller.py:141:26
+    |
+141 | def test_on_improve_text(mock_dependencies) -> None:
+    |                          ^^^^^^^^^^^^^^^^^
+142 |     """Test AI improvement trigger."""
+143 |     controller = WhisperAppController()
+    |
+
+N806 Variable `MockThread` in function should be lowercase
+   --> tests\test_app_controller.py:150:39
+    |
+148 |     controller.pending_text = "Bad text"
+149 |
+150 |     with patch("threading.Thread") as MockThread:
+    |                                       ^^^^^^^^^^
+151 |         controller.on_improve_text()
+152 |         MockThread.assert_called_once()
+    |
+
+PLR2004 Magic value used in comparison, consider replacing `2` with a constant variable
+  --> tests\test_audio_capture.py:22:28
+   |
+20 |     devices = AudioRecorder.list_devices()
+21 |
+22 |     assert len(devices) == 2
+   |                            ^
+23 |     assert devices[0] == (0, "Mic 1")
+24 |     assert devices[1] == (2, "Mic 2")
+   |
+
+ARG001 Unused function argument: `mock_input_stream`
+  --> tests\test_audio_capture.py:28:35
+   |
+27 | @patch("sounddevice.InputStream")
+28 | def test_recorder_verify_callback(mock_input_stream: MagicMock) -> None:
+   |                                   ^^^^^^^^^^^^^^^^^
+29 |     """Test that data is correctly accumulated in the callback."""
+30 |     recorder = AudioRecorder(device_index=0)
+   |
+
+SLF001 Private member accessed: `_callback`
+  --> tests\test_audio_capture.py:34:5
+   |
+32 |     # Manually trigger callback
+33 |     fake_data = np.zeros((10, 1), dtype=np.float32)
+34 |     recorder._callback(fake_data, 10, MagicMock(), MagicMock())
+   |     ^^^^^^^^^^^^^^^^^^
+35 |
+36 |     # Verify data is in frames
+   |
+
+SLF001 Private member accessed: `_lock`
+  --> tests\test_audio_capture.py:37:10
+   |
+36 |     # Verify data is in frames
+37 |     with recorder._lock:
+   |          ^^^^^^^^^^^^^^
+38 |         assert len(recorder.frames) == 1
+39 |         assert np.array_equal(recorder.frames[0], fake_data)
+   |
+
+ARG001 Unused function argument: `mock_input_stream`
+  --> tests\test_audio_capture.py:43:41
+   |
+42 | @patch("sounddevice.InputStream")
+43 | def test_get_current_data_clears_buffer(mock_input_stream: MagicMock) -> None:
+   |                                         ^^^^^^^^^^^^^^^^^
+44 |     """Test get_current_data returns concatenated data and clears buffer."""
+45 |     recorder = AudioRecorder(device_index=0)
+   |
+
+SLF001 Private member accessed: `_lock`
+  --> tests\test_audio_capture.py:50:10
+   |
+48 |     frame1 = np.ones((100, 1), dtype=np.float32)
+49 |     frame2 = np.ones((100, 1), dtype=np.float32)
+50 |     with recorder._lock:
+   |          ^^^^^^^^^^^^^^
+51 |         recorder.frames.append(frame1)
+52 |         recorder.frames.append(frame2)
+   |
+
+PLR2004 Magic value used in comparison, consider replacing `200` with a constant variable
+  --> tests\test_audio_capture.py:57:25
+   |
+56 |     assert data is not None
+57 |     assert len(data) == 200  # 100 + 100, flattened or consolidated
+   |                         ^^^
+58 |     # frames are not cleared by get_current_data in current implementation
+   |
+
+ARG001 Unused function argument: `mock_whisper_model`
+  --> tests\test_transcriber.py:28:33
+   |
+26 | @patch("torch.cuda.is_available")
+27 | def test_transcriber_initialization_cuda_auto(
+28 |     mock_cuda_avail: MagicMock, mock_whisper_model: MagicMock
+   |                                 ^^^^^^^^^^^^^^^^^^
+29 | ) -> None:
+30 |     """Test Transcriber initialization on CUDA with auto compute type."""
+   |
+
+PLR2004 Magic value used in comparison, consider replacing `40` with a constant variable
+  --> tests\test_typer.py:12:25
+   |
+10 |     """Test Typer initialization with default and custom WPM."""
+11 |     typer = Typer()
+12 |     assert typer.wpm == 40
+   |                         ^^
+13 |
+14 |     typer_fast = Typer(wpm=100)
+   |
+
+PLR2004 Magic value used in comparison, consider replacing `100` with a constant variable
+  --> tests\test_typer.py:15:30
+   |
+14 |     typer_fast = Typer(wpm=100)
+15 |     assert typer_fast.wpm == 100
+   |                              ^^^
+   |
+
+PT019 Fixture `_mock_sleep` without value is injected as parameter, use `@pytest.mark.usefixtures` instead
+  --> tests\test_typer.py:37:5
+   |
+35 | @patch("time.sleep")
+36 | def test_type_text_stop_event(
+37 |     _mock_sleep: MagicMock, mock_controller_cls: MagicMock
+   |     ^^^^^^^^^^^^^^^^^^^^^^
+38 | ) -> None:
+39 |     """Test typing stops when stop_event is set."""
+   |
+
+PT019 Fixture `_mock_sleep` without value is injected as parameter, use `@pytest.mark.usefixtures` instead
+  --> tests\test_typer.py:56:5
+   |
+54 | @patch("time.sleep")
+55 | def test_type_text_check_focus_failure(
+56 |     _mock_sleep: MagicMock, mock_controller_cls: MagicMock
+   |     ^^^^^^^^^^^^^^^^^^^^^^
+57 | ) -> None:
+58 |     """Test typing stops when check_focus returns False."""
+   |
+
+Found 35 errors.
+[*] 1 fixable with the `--fix` option.
