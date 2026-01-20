@@ -1,35 +1,11 @@
 import torch
 import numpy as np
-import os
 from faster_whisper import WhisperModel
+from .constants import WHISPER_NAME_MAP
 
 class Transcriber:
     def __init__(self, model_id="openai/whisper-base", language=None, device="cpu", compute_type="auto"):
-        # Map HF model IDs to faster-whisper names
-        name_map = {
-            # Standard Multilingual
-            "openai/whisper-tiny": "tiny",
-            "openai/whisper-base": "base",
-            "openai/whisper-small": "small",
-            "openai/whisper-medium": "medium",
-            "openai/whisper-large-v1": "large-v1",
-            "openai/whisper-large-v2": "large-v2",
-            "openai/whisper-large-v3": "large-v3",
-            "openai/whisper-large": "large",
-            # English-Only
-            "openai/whisper-tiny.en": "tiny.en",
-            "openai/whisper-base.en": "base.en",
-            "openai/whisper-small.en": "small.en",
-            "openai/whisper-medium.en": "medium.en",
-            # Distilled & Turbo
-            "openai/whisper-turbo": "turbo",
-            "openai/whisper-large-v3-turbo": "turbo",
-            "distil-whisper/distil-small.en": "distil-small.en",
-            "distil-whisper/distil-medium.en": "distil-medium.en",
-            "distil-whisper/distil-large-v2": "distil-large-v2",
-            "distil-whisper/distil-large-v3": "distil-large-v3",
-        }
-        self.model_name = name_map.get(model_id, model_id)
+        self.model_name = WHISPER_NAME_MAP.get(model_id, model_id)
         self.language = language
         
         # Validate device

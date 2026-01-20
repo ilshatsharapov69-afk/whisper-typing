@@ -10,5 +10,5 @@
     "device": "cpu",
     "compute_type": "auto",
     "debug": false,
-    "typing_wpm": 250
+    "typing_wpm": 350
 }
