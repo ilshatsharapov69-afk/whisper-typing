@@ -1,40 +1,41 @@
 """Tests for app_controller module."""
 
 import threading
-import time
-from unittest.mock import MagicMock, patch, ANY
+from collections.abc import Generator
+from typing import Any
+from unittest.mock import patch
 
 import pytest
 
-from whisper_typing.app_controller import WhisperAppController, DEFAULT_CONFIG
+from whisper_typing.app_controller import DEFAULT_CONFIG, WhisperAppController
 
 
 @pytest.fixture
-def mock_dependencies():
+def mock_dependencies() -> Generator[dict[str, Any]]:
     """Mock all external dependencies for the controller."""
     with (
-        patch("whisper_typing.app_controller.AudioRecorder") as MockRecorder,
-        patch("whisper_typing.app_controller.Transcriber") as MockTranscriber,
-        patch("whisper_typing.app_controller.Typer") as MockTyper,
-        patch("whisper_typing.app_controller.AIImprover") as MockImprover,
-        patch("whisper_typing.app_controller.WindowManager") as MockWindowManager,
-        patch("pynput.keyboard.GlobalHotKeys") as MockHotKeys,
-        patch("whisper_typing.app_controller.sd") as MockSD,
+        patch("whisper_typing.app_controller.AudioRecorder") as mock_recorder,
+        patch("whisper_typing.app_controller.Transcriber") as mock_transcriber,
+        patch("whisper_typing.app_controller.Typer") as mock_typer,
+        patch("whisper_typing.app_controller.AIImprover") as mock_improver,
+        patch("whisper_typing.app_controller.WindowManager") as mock_window_manager,
+        patch("pynput.keyboard.GlobalHotKeys") as mock_hotkeys,
+        patch("whisper_typing.app_controller.sd") as mock_sd,
     ):
         yield {
-            "recorder": MockRecorder,
-            "transcriber": MockTranscriber,
-            "typer": MockTyper,
-            "improver": MockImprover,
-            "window_manager": MockWindowManager,
-            "hotkeys": MockHotKeys,
-            "sd": MockSD,
+            "recorder": mock_recorder,
+            "transcriber": mock_transcriber,
+            "typer": mock_typer,
+            "improver": mock_improver,
+            "window_manager": mock_window_manager,
+            "hotkeys": mock_hotkeys,
+            "sd": mock_sd,
         }
 
-    MockSD.query_devices.return_value = []
+    mock_sd.query_devices.return_value = []
 
 
-def test_initialization(mock_dependencies):
+def test_initialization(mock_dependencies: dict[str, Any]) -> None:  # noqa: ARG001
     """Test controller initialization."""
     controller = WhisperAppController()
     assert controller.config == {}
@@ -44,7 +45,7 @@ def test_initialization(mock_dependencies):
     assert controller.transcriber is None
 
 
-def test_initialize_components(mock_dependencies):
+def test_initialize_components(mock_dependencies: dict[str, Any]) -> None:  # noqa: ARG001
     """Test initializing components."""
     controller = WhisperAppController()
     controller.config = DEFAULT_CONFIG.copy()
@@ -59,7 +60,7 @@ def test_initialize_components(mock_dependencies):
     assert controller.window_manager is not None
 
 
-def test_start_listener(mock_dependencies):
+def test_start_listener(mock_dependencies: dict[str, Any]) -> None:
     """Test starting the global hotkey listener."""
     controller = WhisperAppController()
     controller.config = DEFAULT_CONFIG.copy()
@@ -68,17 +69,17 @@ def test_start_listener(mock_dependencies):
 
     controller.start_listener()
 
-    ExpectedHotKeys = mock_dependencies["hotkeys"]
-    ExpectedHotKeys.assert_called_once()
+    expected_hotkeys = mock_dependencies["hotkeys"]
+    expected_hotkeys.assert_called_once()
 
     # Check hotkey map creation (simplified check)
-    args, _ = ExpectedHotKeys.call_args
+    args, _ = expected_hotkeys.call_args
     hotkey_map = args[0]
     assert controller.config["hotkey"] in hotkey_map
     assert controller.config["type_hotkey"] in hotkey_map
 
 
-def test_on_record_toggle_start(mock_dependencies):
+def test_on_record_toggle_start(mock_dependencies: dict[str, Any]) -> None:  # noqa: ARG001
     """Test starting recording."""
     controller = WhisperAppController()
     controller.config = DEFAULT_CONFIG.copy()
@@ -101,7 +102,7 @@ def test_on_record_toggle_start(mock_dependencies):
     mock_recorder.start.assert_called_once()
 
 
-def test_on_record_toggle_stop(mock_dependencies):
+def test_on_record_toggle_stop(mock_dependencies: dict[str, Any]) -> None:  # noqa: ARG001
     """Test stopping recording."""
     controller = WhisperAppController()
     controller.config = DEFAULT_CONFIG.copy()
@@ -119,35 +120,33 @@ def test_on_record_toggle_stop(mock_dependencies):
     assert controller.stop_live_transcribe.is_set()
 
 
-def test_on_type_confirm(mock_dependencies):
+def test_on_type_confirm(mock_dependencies: dict[str, Any]) -> None:  # noqa: ARG001
     """Test typing confirmation."""
     controller = WhisperAppController()
     controller.config = DEFAULT_CONFIG.copy()
     controller.config["gemini_api_key"] = "fake"
     controller.initialize_components()
-    mock_typer = controller.typer
 
     controller.pending_text = "Hello World"
 
     # Mock threading to run synchronously for test or just assert it was started
     # Here we simulate the logic inside the thread or check if thread started
-    with patch("threading.Thread") as MockThread:
+    with patch("threading.Thread") as mock_thread:
         controller.on_type_confirm()
-        MockThread.assert_called_once()
+        mock_thread.assert_called_once()
         # You could introspect the target of the thread if needed,
         # but verifying the thread creation is usually sufficient for this level.
 
 
-def test_on_improve_text(mock_dependencies):
+def test_on_improve_text(mock_dependencies: dict[str, Any]) -> None:  # noqa: ARG001
     """Test AI improvement trigger."""
     controller = WhisperAppController()
     controller.config = DEFAULT_CONFIG.copy()
     controller.config["gemini_api_key"] = "fake"
     controller.initialize_components()
-    mock_improver = controller.improver
 
     controller.pending_text = "Bad text"
 
-    with patch("threading.Thread") as MockThread:
+    with patch("threading.Thread") as mock_thread:
         controller.on_improve_text()
-        MockThread.assert_called_once()
+        mock_thread.assert_called_once()
