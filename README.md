@@ -12,9 +12,11 @@ A powerful, human-like background speech-to-text application for Windows that ru
   - **Record/Stop**: `F8` (default)
   - **Confirm Type**: `F9` (default)
   - **Improve Text**: `F10` (default) - Uses Gemini AI to fix grammar and refine text.
+- **Window Refocus**: Automatically switches back to your target window after recording stops (configurable).
 - **Safe Focus**: Automatically stops typing if you switch away from the target window.
-- **Secure Storage**: Sensitive API keys are stored safely in a local `.env` file, not in plain JSON.
+- **Secure Storage**: Sensitive API keys (Gemini) are stored safely in a local `.env` file.
 - **TUI Management**: A sleek terminal interface for monitoring logs, previewing text, and configuring settings.
+- **Microphone Selection**: Choose your preferred input device directly from the configuration screen.
 - **Local Processing**: Audio is processed locally using `faster-whisper` (accelerated with CUDA if available).
 
 ## Prerequisites
@@ -58,7 +60,7 @@ Inside the application, you can use these keys:
 
 1. **Start Recording**: Press **F8**. You will see "Recording" in the status bar.
 2. **Speak**: You will see transcribed text appear in the **Preview Area** in real-time.
-3. **Stop**: Press **F8** again.
+3. **Stop**: Press **F8** again. If enabled, the application will automatically refocus the window you were in before recording.
 4. **Confirm Type**: Switch to your target application (e.g., Notepad, Slack) and press **F9**. The text will be typed out with human-like timing.
 5. **Improve (Optional)**: Press **F10** before typing to have Gemini AI refine your transcription.
 
@@ -68,7 +70,7 @@ You can customize the application via the UI (press `c`) or by editing local fil
 
 ### Secure API Keys
 
-The Gemini API key is stored in a `.env` file:
+The Gemini API key is stored in a `.env` file. You can enter it through the UI on first run or by editing the file:
 
 ```env
 GEMINI_API_KEY=your_key_here
@@ -83,10 +85,14 @@ Other settings are stored in `config.json`:
   "hotkey": "<f8>",
   "type_hotkey": "<f9>",
   "improve_hotkey": "<f10>",
-  "model": "openai/whisper-large-v3-turbo",
+  "model": "openai/whisper-base.en",
+  "language": "en",
+  "device": "cpu",
   "compute_type": "auto",
-  "device": "cuda",
-  "typing_wpm": 40
+  "typing_wpm": 350,
+  "refocus_window": false,
+  "microphone_name": "Default System Mic",
+  "gemini_model": "models/gemini-2.0-flash"
 }
 ```
 
@@ -94,3 +100,4 @@ Other settings are stored in `config.json`:
 
 - **Slow Transcription**: Check the logs to see if "cuda" or "cpu" is being used. You can change this in the Configuration screen.
 - **Hotkeys not working**: Ensure no other application is capturing the same keys.
+- **Microphone Issues**: Ensure the correct microphone is selected in the Configuration screen (`c`).
