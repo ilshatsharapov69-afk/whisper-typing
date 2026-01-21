@@ -8,7 +8,14 @@ license = "MIT"
 authors = [
   { name = "Roger P. Filomeno", email = "rpfilomeno@gmail.com" },
 ]
-keywords = ["example", "fibonacci"]
+keywords = [
+  "background",
+  "local",
+  "speech-to-text",
+  "typing",
+  "whisper",
+  "windows",
+]
 classifiers = [
   "Development Status :: 1 - Planning",
   "Programming Language :: Python :: 3 :: Only",
