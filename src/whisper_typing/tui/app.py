@@ -85,7 +85,12 @@ class WhisperTui(App[None]):
         """
         super().__init__()
         self.controller = controller
-        self.tray = TrayManager(on_quit=self._tray_quit)
+        self.tray = TrayManager(
+            on_quit=self._tray_quit,
+            config=controller.config,
+            on_config_toggle=self._on_config_toggle,
+            on_pause=self._tray_pause,
+        )
 
     def compose(self) -> ComposeResult:
         """Compose the TUI layout."""
@@ -281,6 +286,29 @@ class WhisperTui(App[None]):
     def action_pause(self) -> None:
         """Pause or resume the application."""
         self.controller.toggle_pause()
+
+    def _on_config_toggle(self, key: str, value: object) -> None:
+        """Handle config toggle from tray menu."""
+        from whisper_typing.app_controller import save_config
+
+        self.controller.config[key] = value
+        save_config(self.controller.config)
+        label = {
+            "auto_format": "AI Format",
+            "auto_type": "Auto-Type",
+            "record_mode": "Record mode",
+        }.get(key, key)
+        display = value if key == "record_mode" else ("ON" if value else "OFF")
+        self.write_log(f"{label}: {display}")
+
+        # Restart listener if record_mode changed (hold vs toggle)
+        if key == "record_mode":
+            self.controller.stop()
+            self.controller.start_listener()
+
+    def _tray_pause(self) -> None:
+        """Handle pause from tray icon."""
+        self.call_from_thread(self.action_pause)
 
     def _tray_quit(self) -> None:
         """Handle quit from tray icon."""
