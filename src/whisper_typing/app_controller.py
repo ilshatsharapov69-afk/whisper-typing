@@ -40,6 +40,8 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "model_cache_dir": None,
     "pause_media": True,
     "auto_format": False,
+    "visualizer_style": "bars",
+    "visualizer_gradient": "green_red",
     "format_prompt": (
         "Clean up this spoken transcription. Remove filler words, fix grammar, "
         "structure into clear sentences/paragraphs. Use markdown formatting if "
@@ -381,7 +383,9 @@ class WhisperAppController:
                 logger=self.log,
             )
 
-            # Start overlay (hidden until recording)
+            # Configure and start overlay (hidden until recording)
+            self.overlay.set_style(self.config.get("visualizer_style", "bars"))
+            self.overlay.set_gradient(self.config.get("visualizer_gradient", "green_red"))
             self.overlay.start()
 
             # Start persistent media controller for pause/resume

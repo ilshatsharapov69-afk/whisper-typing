@@ -298,14 +298,25 @@ class WhisperTui(App[None]):
             "auto_type": "Auto-Type",
             "pause_media": "Pause Media",
             "record_mode": "Record mode",
+            "visualizer_style": "Visualizer Style",
+            "visualizer_gradient": "Visualizer Color",
         }.get(key, key)
-        display = value if key == "record_mode" else ("ON" if value else "OFF")
+        if key in ("record_mode", "visualizer_style", "visualizer_gradient"):
+            display = value
+        else:
+            display = "ON" if value else "OFF"
         self.write_log(f"{label}: {display}")
 
         # Restart listener if record_mode changed (hold vs toggle)
         if key == "record_mode":
             self.controller.stop()
             self.controller.start_listener()
+
+        # Apply visualizer changes live
+        if key == "visualizer_style" and isinstance(value, str):
+            self.controller.overlay.set_style(value)
+        elif key == "visualizer_gradient" and isinstance(value, str):
+            self.controller.overlay.set_gradient(value)
 
     def _tray_pause(self) -> None:
         """Handle pause from tray icon."""

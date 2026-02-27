@@ -6,6 +6,8 @@ from typing import TYPE_CHECKING, Any
 from PIL import Image, ImageDraw
 from pystray import Icon, Menu, MenuItem
 
+from whisper_typing.overlay import GRADIENTS, STYLES
+
 if TYPE_CHECKING:
     from collections.abc import Callable
 
@@ -69,6 +71,46 @@ class TrayManager:
     def _build_menu(self) -> Menu:
         """Build the context menu with current toggle states."""
         cfg = self._config
+
+        # Build visualizer style submenu
+        style_labels = {
+            "bars": "Bars (Classic EQ)",
+            "mirror": "Mirror (Symmetric)",
+            "wave": "Wave (Smooth)",
+            "circles": "Circles (Pulsing)",
+            "blocks": "Blocks (LED Matrix)",
+            "line": "Line (Minimal)",
+        }
+        style_items = []
+        for s in STYLES:
+            label = style_labels.get(s, s)
+            style_items.append(
+                MenuItem(
+                    label,
+                    self._make_style_callback(s),
+                    checked=self._make_style_checker(s),
+                )
+            )
+
+        # Build gradient submenu
+        gradient_labels = {
+            "green_red": "Green → Red",
+            "cyan_purple": "Cyan → Purple",
+            "blue_white": "Blue → White",
+            "fire": "Fire",
+            "neon": "Neon",
+        }
+        gradient_items = []
+        for g in GRADIENTS:
+            label = gradient_labels.get(g, g)
+            gradient_items.append(
+                MenuItem(
+                    label,
+                    self._make_gradient_callback(g),
+                    checked=self._make_gradient_checker(g),
+                )
+            )
+
         return Menu(
             MenuItem("Whisper Typing", None, enabled=False),
             Menu.SEPARATOR,
@@ -92,6 +134,9 @@ class TrayManager:
                 self._toggle_hold_mode,
                 checked=lambda _: cfg.get("record_mode") == "hold",
             ),
+            Menu.SEPARATOR,
+            MenuItem("Visualizer Style", Menu(*style_items)),
+            MenuItem("Visualizer Color", Menu(*gradient_items)),
             Menu.SEPARATOR,
             MenuItem(
                 "Pause",
@@ -175,6 +220,28 @@ class TrayManager:
         if self._on_config_toggle:
             self._on_config_toggle("record_mode", new_val)
         self._icon.menu = self._build_menu()
+
+    def _make_style_callback(self, style: str) -> "Callable[[Any, Any], None]":
+        def cb(icon: Any, item: Any) -> None:  # noqa: ANN401
+            self._config["visualizer_style"] = style
+            if self._on_config_toggle:
+                self._on_config_toggle("visualizer_style", style)
+            self._icon.menu = self._build_menu()
+        return cb
+
+    def _make_style_checker(self, style: str) -> "Callable[[Any], bool]":
+        return lambda _: self._config.get("visualizer_style", "bars") == style
+
+    def _make_gradient_callback(self, gradient: str) -> "Callable[[Any, Any], None]":
+        def cb(icon: Any, item: Any) -> None:  # noqa: ANN401
+            self._config["visualizer_gradient"] = gradient
+            if self._on_config_toggle:
+                self._on_config_toggle("visualizer_gradient", gradient)
+            self._icon.menu = self._build_menu()
+        return cb
+
+    def _make_gradient_checker(self, gradient: str) -> "Callable[[Any], bool]":
+        return lambda _: self._config.get("visualizer_gradient", "green_red") == gradient
 
     def _pause_clicked(self, icon: Any, item: Any) -> None:  # noqa: ANN401
         if self._on_pause:
