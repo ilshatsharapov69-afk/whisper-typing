@@ -296,6 +296,7 @@ class WhisperTui(App[None]):
         label = {
             "auto_format": "AI Format",
             "auto_type": "Auto-Type",
+            "pause_media": "Pause Media",
             "record_mode": "Record mode",
         }.get(key, key)
         display = value if key == "record_mode" else ("ON" if value else "OFF")

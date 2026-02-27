@@ -38,6 +38,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "gemini_api_key": None,
     "refocus_window": True,
     "model_cache_dir": None,
+    "pause_media": True,
     "auto_format": False,
     "format_prompt": (
         "Clean up this spoken transcription. Remove filler words, fix grammar, "

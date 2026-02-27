@@ -83,6 +83,11 @@ class TrayManager:
                 checked=lambda _: cfg.get("auto_type", False),
             ),
             MenuItem(
+                "Pause Media",
+                self._toggle_pause_media,
+                checked=lambda _: cfg.get("pause_media", True),
+            ),
+            MenuItem(
                 "Hold-to-Record",
                 self._toggle_hold_mode,
                 checked=lambda _: cfg.get("record_mode") == "hold",
@@ -155,6 +160,13 @@ class TrayManager:
         self._config["auto_type"] = new_val
         if self._on_config_toggle:
             self._on_config_toggle("auto_type", new_val)
+        self._icon.menu = self._build_menu()
+
+    def _toggle_pause_media(self, icon: Any, item: Any) -> None:  # noqa: ANN401
+        new_val = not self._config.get("pause_media", True)
+        self._config["pause_media"] = new_val
+        if self._on_config_toggle:
+            self._on_config_toggle("pause_media", new_val)
         self._icon.menu = self._build_menu()
 
     def _toggle_hold_mode(self, icon: Any, item: Any) -> None:  # noqa: ANN401
