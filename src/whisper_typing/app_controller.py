@@ -38,6 +38,13 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "gemini_api_key": None,
     "refocus_window": True,
     "model_cache_dir": None,
+    "auto_format": False,
+    "format_prompt": (
+        "Clean up this spoken transcription. Remove filler words, fix grammar, "
+        "structure into clear sentences/paragraphs. Use markdown formatting if "
+        "the content contains lists, instructions or multiple topics. "
+        "Keep the original language. Output ONLY the cleaned text, no explanations."
+    ),
 }
 
 
@@ -667,6 +674,24 @@ class WhisperAppController:
                             self.log(f"Transcribed: {text}")
                             if self.on_preview_update:
                                 self.on_preview_update(text, None)
+
+                            # Auto-format via Gemini if enabled
+                            if self.config.get("auto_format", False) and self.improver:
+                                self.set_status("Formatting")
+                                self.log("Formatting text via AI...")
+                                fmt_prompt = self.config.get("format_prompt", "")
+                                if fmt_prompt:
+                                    prompt = fmt_prompt + "\n\nText: " + text
+                                    formatted = self.improver.improve_text(
+                                        text, prompt_template=prompt
+                                    )
+                                    if formatted and formatted != text:
+                                        original = text
+                                        text = formatted
+                                        self.pending_text = text
+                                        self.log("Text formatted.")
+                                        if self.on_preview_update:
+                                            self.on_preview_update(text, original)
 
                             # Auto-type if enabled
                             if self.config.get("auto_type", False):
