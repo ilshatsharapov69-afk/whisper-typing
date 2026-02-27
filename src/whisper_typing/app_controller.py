@@ -1,5 +1,6 @@
 """Main application controller for whisper-typing."""
 
+import ctypes
 import json
 import os
 import threading
@@ -13,6 +14,7 @@ from pynput import keyboard
 
 from whisper_typing.ai_improver import AIImprover
 from whisper_typing.audio_capture import AudioRecorder
+from whisper_typing.overlay import AudioOverlay
 from whisper_typing.transcriber import Transcriber
 from whisper_typing.typer import Typer
 from whisper_typing.window_manager import WindowManager
@@ -78,6 +80,72 @@ def save_config(config: dict[str, Any], config_path: str = "config.json") -> Non
         pass
 
 
+class MediaController:
+    """Pause/resume media using Windows SMTC (System Media Transport Controls).
+
+    Uses try_pause_async / try_play_async — explicit commands, not toggle.
+    Correctly detects Playing vs Paused state via playback_status.
+    """
+
+    def __init__(self, logger: "Callable[[str], None] | None" = None) -> None:
+        self._log = logger or (lambda _: None)
+        self._we_paused: bool = False
+
+    def pause_if_playing(self) -> bool:
+        """Pause media if currently playing. Returns True if we paused."""
+        import asyncio
+
+        try:
+            return asyncio.run(self._async_pause_if_playing())
+        except Exception as e:
+            self._log(f"MediaController pause error: {e}")
+            return False
+
+    def resume(self) -> None:
+        """Resume media if we previously paused it."""
+        import asyncio
+
+        try:
+            asyncio.run(self._async_resume())
+        except Exception as e:
+            self._log(f"MediaController resume error: {e}")
+
+    async def _async_pause_if_playing(self) -> bool:
+        from winrt.windows.media.control import (
+            GlobalSystemMediaTransportControlsSessionManager as Mgr,
+        )
+
+        manager = await Mgr.request_async()
+        session = manager.get_current_session()
+        if not session:
+            self._log("No media session found.")
+            return False
+
+        info = session.get_playback_info()
+        # PlaybackStatus: 4=Playing, 5=Paused
+        if info.playback_status == 4:
+            result = await session.try_pause_async()
+            self._log(f"Media paused (success={result}).")
+            return bool(result)
+
+        self._log(f"Media not playing (status={info.playback_status}) — skipping.")
+        return False
+
+    async def _async_resume(self) -> None:
+        from winrt.windows.media.control import (
+            GlobalSystemMediaTransportControlsSessionManager as Mgr,
+        )
+
+        manager = await Mgr.request_async()
+        session = manager.get_current_session()
+        if session:
+            result = await session.try_play_async()
+            self._log(f"Media resumed (success={result}).")
+
+    def stop(self) -> None:
+        """Nothing to clean up."""
+
+
 class WhisperAppController:
     """Controller for Whisper Typing App logic.
 
@@ -93,6 +161,7 @@ class WhisperAppController:
         self.improver: AIImprover | None = None
         self.listener: keyboard.GlobalHotKeys | None = None
         self.window_manager: WindowManager = WindowManager()
+        self.overlay: AudioOverlay = AudioOverlay()
         self.target_window_handle: Any | None = None
 
         self.is_processing: bool = False
@@ -116,6 +185,13 @@ class WhisperAppController:
 
         self.typing_stop_event: threading.Event = threading.Event()
         self._is_typing: bool = False
+
+        # Hold-to-talk state
+        self._hold_listener: keyboard.Listener | None = None
+        self._hold_key: Any = None
+        self._hold_key_pressed: bool = False
+        self._we_paused_media: bool = False
+        self._media: MediaController | None = None
 
     def log(self, message: str) -> None:
         """Log a message using the configured UI callback.
@@ -297,6 +373,13 @@ class WhisperAppController:
                 logger=self.log,
             )
 
+            # Start overlay (hidden until recording)
+            self.overlay.start()
+
+            # Start persistent media controller for pause/resume
+            if not self._media:
+                self._media = MediaController(logger=self.log)
+
             self.log("Components initialized.")
         except Exception as e:  # noqa: BLE001
             self.log(f"Error initializing components: {e}")
@@ -308,26 +391,156 @@ class WhisperAppController:
         """Start the hotkey listener."""
         if self.listener:
             self.listener.stop()
+        if self._hold_listener:
+            self._hold_listener.stop()
+
+        record_mode = self.config.get("record_mode", "toggle")
 
         try:
-            self.listener = keyboard.GlobalHotKeys(
-                {
-                    self.config["hotkey"]: self.on_record_toggle,
-                    self.config["type_hotkey"]: self.on_type_confirm,
-                    self.config["improve_hotkey"]: self.on_improve_text,
-                }
-            )
-            self.listener.start()
-            self.log(f"Hotkeys registered. Press {self.config['hotkey']} to record.")
+            if record_mode == "hold":
+                # Hold-to-talk mode: use Listener for press/release detection
+                self._setup_hold_listener()
+                # Still register type/improve hotkeys via GlobalHotKeys
+                self.listener = keyboard.GlobalHotKeys(
+                    {
+                        self.config["type_hotkey"]: self.on_type_confirm,
+                        self.config["improve_hotkey"]: self.on_improve_text,
+                    }
+                )
+                self.listener.start()
+                hotkey_name = self.config["hotkey"]
+                self.log(f"Hold-to-talk mode. Hold {hotkey_name} to record, release to transcribe+type.")
+            else:
+                # Toggle mode (original behavior)
+                self.listener = keyboard.GlobalHotKeys(
+                    {
+                        self.config["hotkey"]: self.on_record_toggle,
+                        self.config["type_hotkey"]: self.on_type_confirm,
+                        self.config["improve_hotkey"]: self.on_improve_text,
+                    }
+                )
+                self.listener.start()
+                self.log(f"Hotkeys registered. Press {self.config['hotkey']} to record.")
             self.set_status("Ready")
         except ValueError as e:
             self.log(f"Invalid hotkey format: {e}")
             self.set_status("Hotkey Error")
 
+    def _setup_hold_listener(self) -> None:
+        """Set up keyboard listener for hold-to-talk mode."""
+        hotkey_str = self.config["hotkey"]
+        # Map config string to pynput Key and Windows VK code
+        key_map = {
+            "alt_l": (keyboard.Key.alt_l, 0xA4),
+            "alt_r": (keyboard.Key.alt_r, 0xA5),
+            "ctrl_l": (keyboard.Key.ctrl_l, 0xA2),
+            "ctrl_r": (keyboard.Key.ctrl_r, 0xA3),
+            "shift_l": (keyboard.Key.shift_l, 0xA0),
+            "shift_r": (keyboard.Key.shift_r, 0xA1),
+            "caps_lock": (keyboard.Key.caps_lock, 0x14),
+        }
+        key_info = key_map.get(hotkey_str, (None, None))
+        self._hold_key = key_info[0]
+        self._hold_vk = key_info[1]
+        self._hold_key_pressed = False
+        self._is_caps_lock = hotkey_str == "caps_lock"
+
+        def on_press(key: Any) -> None:  # noqa: ANN401
+            if key == self._hold_key and not self._hold_key_pressed:
+                self._hold_key_pressed = True
+                self._on_hold_start()
+
+        def on_release(key: Any) -> None:  # noqa: ANN401
+            if key == self._hold_key and self._hold_key_pressed:
+                self._hold_key_pressed = False
+                self._on_hold_release()
+
+        if self._is_caps_lock:
+            # Force CapsLock OFF at startup
+            self._ensure_caps_lock_off()
+
+            # Suppress CapsLock so it doesn't toggle caps or show OSD
+            def win32_event_filter(msg: int, data: Any) -> bool:  # noqa: ANN401
+                if hasattr(data, "vkCode") and data.vkCode == 0x14:  # VK_CAPITAL
+                    self._hold_listener._suppress = True  # noqa: SLF001
+                else:
+                    self._hold_listener._suppress = False  # noqa: SLF001
+                return True
+
+            self._hold_listener = keyboard.Listener(
+                on_press=on_press,
+                on_release=on_release,
+                win32_event_filter=win32_event_filter,
+            )
+        else:
+            self._hold_listener = keyboard.Listener(
+                on_press=on_press,
+                on_release=on_release,
+            )
+        self._hold_listener.start()
+
+    def _cancel_recording(self) -> None:
+        """Cancel an in-progress recording without transcribing."""
+        if self.recorder and self.recorder.recording:
+            self.stop_live_transcribe.set()
+            if self.live_transcribe_thread:
+                self.live_transcribe_thread.join(timeout=1)
+            self.recorder.stop()
+            self.log("Recording cancelled.")
+            self.set_status("Ready")
+
+    @staticmethod
+    def _ensure_caps_lock_off() -> None:
+        """Force CapsLock to OFF state if it's currently ON."""
+        user32 = ctypes.windll.user32
+        VK_CAPITAL = 0x14
+        KEYEVENTF_KEYUP = 0x0002
+        # GetKeyState bit 0 = toggled ON
+        if user32.GetKeyState(VK_CAPITAL) & 1:
+            # Simulate press+release to toggle it OFF
+            user32.keybd_event(VK_CAPITAL, 0x3A, 0, 0)
+            user32.keybd_event(VK_CAPITAL, 0x3A, KEYEVENTF_KEYUP, 0)
+
+    def _on_hold_start(self) -> None:
+        """Handle hold key press — start recording."""
+        if self.paused or self.is_processing:
+            return
+        if not self.recorder:
+            self.log("Recorder not initialized.")
+            return
+        if self.recorder.recording:
+            return
+
+        def do_start() -> None:
+            self._we_paused_media = False
+            if self.config.get("pause_media", True) and self._media:
+                self._we_paused_media = self._media.pause_if_playing()
+            self._start_recording()
+
+        threading.Thread(target=do_start, daemon=True).start()
+
+    def _on_hold_release(self) -> None:
+        """Handle hold key release — stop recording, transcribe, auto-type."""
+        if not self.recorder or not self.recorder.recording:
+            return
+
+        def do_release() -> None:
+            if self._we_paused_media and self._media:
+                self._media.resume()
+                self._we_paused_media = False
+            self._stop_recording_and_type()
+
+        threading.Thread(target=do_release, daemon=True).start()
+
     def stop(self) -> None:
         """Stop the hotkey listener."""
         if self.listener:
             self.listener.stop()
+        if self._hold_listener:
+            self._hold_listener.stop()
+        if self._media:
+            self._media.stop()
+        self.overlay.stop()
 
     def toggle_pause(self) -> None:
         """Toggle the application pause state."""
@@ -371,6 +584,8 @@ class WhisperAppController:
 
         if self.recorder:
             self.recorder.start()
+            # Show audio visualizer overlay
+            self.overlay.show(self.recorder)
         self.set_status("Recording")
         self.log("Recording started...")
 
@@ -422,6 +637,99 @@ class WhisperAppController:
         else:
             self.log("No audio data.")
             self.set_status("Ready")
+
+    def _stop_recording_and_type(self) -> None:
+        """Stop recording, transcribe, and auto-type the result."""
+        self.log("Stopping recording...")
+        self.overlay.show_processing()  # Switch to yellow dot while transcribing
+        self.set_status("Processing")
+
+        # Stop live transcription loop
+        self.stop_live_transcribe.set()
+        if self.live_transcribe_thread:
+            self.live_transcribe_thread.join()
+
+        if not self.recorder:
+            self.overlay.hide()
+            return
+
+        audio_data = self.recorder.stop()
+
+        if audio_data is not None:
+            self.is_processing = True
+
+            def process_and_type() -> None:
+                try:
+                    if self.transcriber:
+                        text = self.transcriber.transcribe(audio_data)
+                        if text:
+                            self.pending_text = text
+                            self.log(f"Transcribed: {text}")
+                            if self.on_preview_update:
+                                self.on_preview_update(text, None)
+
+                            # Auto-type if enabled
+                            if self.config.get("auto_type", False):
+                                self.set_status("Typing")
+                                self._auto_type_text(text)
+                            else:
+                                self.set_status("Text Ready")
+                        else:
+                            self.log("No text transcribed.")
+                            self.set_status("Ready")
+                except Exception as e:  # noqa: BLE001
+                    self.log(f"Error: {e}")
+                    self.set_status("Error")
+                finally:
+                    self.is_processing = False
+                    self.overlay.hide()
+
+            threading.Thread(target=process_and_type).start()
+        else:
+            self.log("No audio data.")
+            self.overlay.hide()
+            self.set_status("Ready")
+
+    def _auto_type_text(self, text: str) -> None:
+        """Instantly paste text into the active window via clipboard."""
+        import pyperclip
+
+        user32 = ctypes.windll.user32
+        VK_CONTROL = 0x11
+        VK_V = 0x56
+        KEYEVENTF_KEYUP = 0x0002
+
+        # Save current clipboard content
+        try:
+            old_clipboard = pyperclip.paste()
+        except Exception:  # noqa: BLE001
+            old_clipboard = ""
+
+        # Force-focus the window where recording started
+        if self.target_window_handle and hasattr(self.target_window_handle, "_hWnd"):
+            hwnd = self.target_window_handle._hWnd  # noqa: SLF001
+            user32.SetForegroundWindow(hwnd)
+            time.sleep(0.15)
+
+        # Copy text to clipboard
+        pyperclip.copy(text)
+        time.sleep(0.05)
+
+        # Ctrl+V via low-level Windows API
+        user32.keybd_event(VK_CONTROL, 0, 0, 0)
+        user32.keybd_event(VK_V, 0, 0, 0)
+        user32.keybd_event(VK_V, 0, KEYEVENTF_KEYUP, 0)
+        user32.keybd_event(VK_CONTROL, 0, KEYEVENTF_KEYUP, 0)
+        time.sleep(0.1)
+
+        # Restore previous clipboard content
+        try:
+            pyperclip.copy(old_clipboard)
+        except Exception:  # noqa: BLE001
+            pass
+
+        self.log("Pasted.")
+        self.set_status("Ready")
 
     def _live_transcription_loop(self) -> None:
         """Periodically transcribe the current audio buffer during recording."""

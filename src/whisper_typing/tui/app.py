@@ -14,6 +14,7 @@ from textual.reactive import reactive
 from textual.widgets import Footer, Header, Label, RichLog, Static
 
 from whisper_typing.app_controller import WhisperAppController
+from whisper_typing.tray_icon import TrayManager
 from whisper_typing.tui.screens import ApiKeyPromptScreen, ConfigurationScreen
 
 
@@ -84,6 +85,7 @@ class WhisperTui(App[None]):
         """
         super().__init__()
         self.controller = controller
+        self.tray = TrayManager(on_quit=self._tray_quit)
 
     def compose(self) -> ComposeResult:
         """Compose the TUI layout."""
@@ -102,6 +104,9 @@ class WhisperTui(App[None]):
     def on_mount(self) -> None:
         """Handle application mounting."""
         self.title = "Whisper Typing"
+
+        # Start system tray icon
+        self.tray.start()
 
         # Connect Controller Callbacks
         self.controller.on_log = self.write_log
@@ -184,13 +189,14 @@ class WhisperTui(App[None]):
         log_widget.write(f"[bold blue][{timestamp}][/bold blue] {display_message}")
 
     def update_status(self, status: str) -> None:
-        """Update the TUI status bar.
+        """Update the TUI status bar and tray icon.
 
         Args:
             status: The new status string to display.
 
         """
         self.status_message = status
+        self.tray.update_state(status)
         # Update style based on status content (simple heuristic)
         try:
             status_widget = self.query_one("#status_bar", Label)
@@ -276,7 +282,12 @@ class WhisperTui(App[None]):
         """Pause or resume the application."""
         self.controller.toggle_pause()
 
+    def _tray_quit(self) -> None:
+        """Handle quit from tray icon."""
+        self.call_from_thread(self.action_quit)
+
     def action_quit(self) -> None:
         """Quit the application."""
         self.controller.stop()
+        self.tray.stop()
         self.exit()

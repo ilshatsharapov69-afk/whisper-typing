@@ -38,11 +38,14 @@ dependencies = [
   "textual>=0.70.0",
   "torchaudio>=2.0.0",
   "transformers>=4.57.6",
+  "pystray>=0.19.5",
+  "pillow>=10.0.0",
+  "winrt-windows-media-control>=2.0.0b1",
 ]
 
 [project.urls]
-issues = "https://github.com/rpfilomeno/whispher-typing/issues"
-repository = "https://github.com/rpfilomeno/whispher-typing"
+issues = "https://github.com/ilshatsharapov69-afk/whisper-typing/issues"
+repository = "https://github.com/ilshatsharapov69-afk/whisper-typing"
 
 [project.scripts]
 whisper-typing = "whisper_typing.__main__:main"

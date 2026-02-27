@@ -1,20 +1,26 @@
 # Whisper Typing
 
-![whiisper](https://github.com/user-attachments/assets/8bbd34ac-38d2-481e-9356-06e9f4498f0e)
+![whisper](https://github.com/user-attachments/assets/8bbd34ac-38d2-481e-9356-06e9f4498f0e)
 
 A powerful, human-like background speech-to-text application for Windows that runs locally. It listens for a global hotkey to record your voice, transcribes it in real-time using `faster-whisper`, and types the result into your active window with natural rhythm and pace.
+
+> Fork of [rpfilomeno/whisper-typing](https://github.com/rpfilomeno/whisper-typing) with system tray support, audio overlay, media pause, and hold-to-record mode.
 
 ## Features
 
 - **Real-Time Transcription**: See your words appear in the preview area instantly as you speak.
 - **Human-like Typing**: Simulates natural typing with variable speed, random jitter, and intelligent pauses after punctuation.
+- **System Tray Icon**: Runs in the background with a color-coded tray icon (green = ready, red = recording, yellow = processing).
+- **Audio Overlay**: Floating audio level visualization while recording.
+- **Media Auto-Pause**: Automatically pauses your music/video when recording starts, resumes when done.
+- **Hold-to-Record**: Hold the hotkey to record, release to stop (configurable: hold or toggle mode).
+- **Auto-Type**: Automatically types the transcribed text after recording stops.
 - **Global Hotkeys**: Control recording and typing from any application.
-  - **Record/Stop**: `F8` (default)
+  - **Record/Stop**: `Caps Lock` or `F8` (configurable)
   - **Confirm Type**: `F9` (default)
   - **Improve Text**: `F10` (default) - Uses Gemini AI to fix grammar and refine text.
-- **Window Refocus**: Automatically switches back to your target window after recording stops (configurable).
+- **Window Refocus**: Automatically switches back to your target window after recording stops.
 - **Safe Focus**: Automatically stops typing if you switch away from the target window.
-- **Secure Storage**: Sensitive API keys (Gemini) are stored safely in a local `.env` file.
 - **TUI Management**: A sleek terminal interface for monitoring logs, previewing text, and configuring settings.
 - **Microphone Selection**: Choose your preferred input device directly from the configuration screen.
 - **Local Processing**: Audio is processed locally using `faster-whisper` (accelerated with CUDA if available).
@@ -22,106 +28,114 @@ A powerful, human-like background speech-to-text application for Windows that ru
 ## Prerequisites
 
 - **Python 3.13+**
+- **uv** — Python package manager ([install](https://docs.astral.sh/uv/getting-started/installation/))
 - **NVIDIA GPU (Recommended)**: Supports CUDA for lightning-fast transcription. Fallback to CPU is supported but slower.
 
-## Installation
-
-This project uses `uv` for dependency management.
-
-1. **Clone the repository**:
-   ```bash
-   git clone https://github.com/rpfilomeno/whispher-typing.git
-   cd whispher-typing
-   ```
-
-2. **Install dependencies**:
-   ```bash
-   uv sync
-   ```
-
-## Usage
-
-Run the application using `uv`:
+## Quick Start (3 steps)
 
 ```bash
+# 1. Clone
+git clone https://github.com/ilshatsharapov69-afk/whisper-typing.git
+cd whisper-typing
+
+# 2. Install dependencies
+uv sync
+
+# 3. Run
 uv run whisper-typing
 ```
 
-## Build EXE
+On first run, models will be downloaded automatically (~1.5 GB for `whisper-large-v3-turbo`).
 
-Build a Windows executable application:
+## Silent Launch (no console window)
 
-```bash
-build_dist.ps1
+To run whisper-typing in the background with only the system tray icon visible:
+
+**Option 1**: Double-click `whisper-typing-silent.vbs`
+
+**Option 2**: Add to Windows startup — copy `whisper-typing-silent.vbs` to:
 ```
-
-### TUI Shortcuts
-
-Inside the application, you can use these keys:
-
-- **`c`**: Open Configuration screen.
-- **`p`**: Pause/Resume hotkeys.
-- **`r`**: Reload configuration.
-- **`q`**: Quit the application.
-
-### Workflow
-
-1. **Start Recording**: Press **F8**. You will see "Recording" in the status bar.
-2. **Speak**: You will see transcribed text appear in the **Preview Area** in real-time.
-3. **Stop**: Press **F8** again. If enabled, the application will automatically refocus the window you were in before recording.
-4. **Confirm Type**: Switch to your target application (e.g., Notepad, Slack) and press **F9**. The text will be typed out with human-like timing.
-5. **Improve (Optional)**: Press **F10** before typing to have Gemini AI refine your transcription.
+%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup\
+```
 
 ## Configuration
 
-You can customize the application via the UI (press `c`) or by editing local files.
+### Hotkeys & Settings (`config.json`)
 
-### Secure API Keys
+On first run, a `config.json` is created with defaults. You can edit it or press `c` in the TUI:
 
-The Gemini API key is stored in a `.env` file. You can enter it through the UI on first run or by editing the file:
+```json
+{
+  "hotkey": "caps_lock",
+  "type_hotkey": "<f9>",
+  "improve_hotkey": "<f10>",
+  "model": "openai/whisper-large-v3-turbo",
+  "language": null,
+  "device": "cuda",
+  "compute_type": "float16",
+  "typing_wpm": 350,
+  "refocus_window": true,
+  "record_mode": "hold",
+  "auto_type": true,
+  "model_cache_dir": "./models/"
+}
+```
+
+| Setting | Description |
+|---------|-------------|
+| `hotkey` | Record trigger key (`caps_lock`, `<f8>`, etc.) |
+| `record_mode` | `"hold"` = hold key to record, `"toggle"` = press to start/stop |
+| `auto_type` | Automatically type text after recording stops |
+| `device` | `"cuda"` for GPU, `"cpu"` for CPU-only |
+| `model` | Whisper model (`whisper-base.en` for fast, `whisper-large-v3-turbo` for quality) |
+| `language` | `null` for auto-detect, `"en"`, `"ru"`, etc. |
+
+### AI Text Improvement (optional)
+
+To enable AI grammar correction (F10), create a `.env` file:
 
 ```env
 GEMINI_API_KEY=your_key_here
 ```
 
-### JSON Configuration (`config.json`)
+Get a free API key at [Google AI Studio](https://aistudio.google.com/apikey).
 
-Other settings are stored in `config.json`:
+### TUI Shortcuts
 
-```json
-{
-  "hotkey": "<f8>",
-  "type_hotkey": "<f9>",
-  "improve_hotkey": "<f10>",
-  "model": "openai/whisper-base.en",
-  "language": "en",
-  "device": "cpu",
-  "compute_type": "auto",
-  "typing_wpm": 350,
-  "refocus_window": false,
-  "microphone_name": "Default System Mic",
-  "gemini_model": "models/gemini-2.0-flash",
-  "model_cache_dir": "./models/"
-}
+Inside the application:
+
+- **`c`**: Open Configuration screen
+- **`p`**: Pause/Resume hotkeys
+- **`r`**: Reload configuration
+- **`q`**: Quit the application
+
+## Build EXE
+
+Build a standalone Windows executable:
+
+```powershell
+.\build_dist.ps1
 ```
 
-## Model Storage
+## System Tray
 
-By default, Whisper models are downloaded and stored in the Hugging Face cache directory:
+The app shows a system tray icon with state indicators:
 
-- **Windows**: `%USERPROFILE%\.cache\huggingface\hub`
-- **Linux/macOS**: `~/.cache/huggingface/hub`
+| Color | State |
+|-------|-------|
+| Green | Ready — waiting for hotkey |
+| Red | Recording — speak now |
+| Yellow | Processing / Loading / Typing |
 
-### Changing the Storage Location
-
-You can change where models are stored in three ways:
-
-1. **Configuration Screen**: Press `c` in the app and set the **Model Cache Dir**.
-2. **JSON Config**: Manually add or edit the `"model_cache_dir"` field in `config.json`.
-3. **Environment Variable**: Set the `HF_HOME` environment variable on your system.
+Right-click the tray icon to quit.
 
 ## Troubleshooting
 
-- **Slow Transcription**: Check the logs to see if "cuda" or "cpu" is being used. You can change this in the Configuration screen.
-- **Hotkeys not working**: Ensure no other application is capturing the same keys.
-- **Microphone Issues**: Ensure the correct microphone is selected in the Configuration screen (`c`).
+- **Slow Transcription**: Check if `cuda` or `cpu` is being used (see logs). Change in config.
+- **Hotkeys not working**: Ensure no other application captures the same keys.
+- **Microphone Issues**: Press `c` to open config and select the correct microphone.
+- **No tray icon**: Make sure `pystray` and `pillow` are installed (`uv sync` should handle this).
+
+## Credits
+
+Based on [rpfilomeno/whisper-typing](https://github.com/rpfilomeno/whisper-typing). MIT License.
