@@ -67,9 +67,7 @@ def test_get_current_data_clears_buffer(mock_input_stream: MagicMock) -> None:  
 
 def test_start_stop_logic() -> None:
     """Test start and stop state logic (mocking the actual thread or run loop)."""
-    # We mock _record to avoid actual IO
-    with patch.object(AudioRecorder, "_record") as mock_record:
-        mock_record.side_effect = lambda: time.sleep(SLEEP_DURATION)
+    with patch("sounddevice.InputStream"):
         recorder = AudioRecorder()
 
         recorder.start()
@@ -80,8 +78,8 @@ def test_start_stop_logic() -> None:
         # Stop
         recorder.stop()
         assert recorder.recording is False
-        recorder.thread.join(timeout=TIMEOUT)
-        assert not recorder.thread.is_alive()
+        # Thread should be cleaned up after stop
+        assert recorder.thread is None
 
 
 @patch("sounddevice.InputStream")
@@ -111,34 +109,24 @@ def test_start_when_already_recording(mock_input_stream: MagicMock) -> None:  # 
 
 
 def test_record_exception_handling() -> None:
-    """Test _record handles exceptions and sets recording to False."""
+    """Test _record handles exceptions gracefully."""
     with patch("sounddevice.InputStream") as mock_stream:
         mock_stream.side_effect = Exception("Stream error")
         recorder = AudioRecorder()
         recorder.recording = True
         recorder._record()  # noqa: SLF001
+        # After exception, recording should be False (set in finally)
         assert recorder.recording is False
 
 
-def test_record_loop_with_sleep() -> None:
-    """Test _record loop executes with sd.sleep."""
-    with (
-        patch("sounddevice.InputStream") as mock_stream_cls,
-        patch("sounddevice.sleep") as mock_sleep,
-    ):
-        mock_stream = MagicMock()
-        mock_stream_cls.return_value.__enter__.return_value = mock_stream
-
+def test_record_stops_on_event() -> None:
+    """Test _record exits when stop event is set."""
+    with patch("sounddevice.InputStream"):
         recorder = AudioRecorder()
         recorder.recording = True
 
-        # Make sleep stop recording after first call
-        def stop_recording(*args: object) -> None:  # noqa: ARG001
-            recorder.recording = False
-
-        mock_sleep.side_effect = stop_recording
-
+        # Set stop event immediately — _record should exit
+        recorder._stop_event.set()  # noqa: SLF001
         recorder._record()  # noqa: SLF001
 
-        # Verify sleep was called
-        mock_sleep.assert_called()
+        assert recorder.recording is False

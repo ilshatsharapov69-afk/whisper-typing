@@ -32,6 +32,7 @@ class AudioRecorder:
         self.frames: list[np.ndarray] = []
         self.thread: threading.Thread | None = None
         self._lock: Final[threading.Lock] = threading.Lock()
+        self._stop_event = threading.Event()
 
     @staticmethod
     def list_devices() -> list[tuple[int, str]]:
@@ -47,6 +48,10 @@ class AudioRecorder:
             if dev["max_input_channels"] > 0:
                 input_devices.append((i, dev["name"]))
         return input_devices
+
+    # Max samples to keep in buffer (5 minutes at 16kHz = 4,800,000 samples)
+    _MAX_SAMPLES: int = 16000 * 300
+    _total_samples: int = 0
 
     def _callback(
         self,
@@ -69,6 +74,11 @@ class AudioRecorder:
             pass
         with self._lock:
             self.frames.append(indata.copy())
+            self._total_samples += len(indata)
+            # Prevent unbounded memory growth — trim oldest frames beyond 5 min
+            while self._total_samples > self._MAX_SAMPLES and len(self.frames) > 1:
+                removed = self.frames.pop(0)
+                self._total_samples -= len(removed)
 
     def _record(self) -> None:
         """Run the internal recording loop."""
@@ -79,9 +89,11 @@ class AudioRecorder:
                 device=self.device_index,
                 callback=self._callback,
             ):
-                while self.recording:
-                    sd.sleep(100)
+                # Wait on event instead of polling — wakes up instantly on stop()
+                self._stop_event.wait()
         except Exception:  # noqa: BLE001
+            pass
+        finally:
             self.recording = False
 
     def start(self) -> None:
@@ -89,10 +101,19 @@ class AudioRecorder:
         if self.recording:
             return
 
+        # Ensure previous recording thread is fully dead before starting new one
+        if self.thread is not None and self.thread.is_alive():
+            self._stop_event.set()
+            self.recording = False
+            self.thread.join(timeout=2.0)
+            self.thread = None
+
+        self._stop_event.clear()
         self.recording = True
         with self._lock:
             self.frames = []  # Clear frames
-        self.thread = threading.Thread(target=self._record)
+            self._total_samples = 0
+        self.thread = threading.Thread(target=self._record, daemon=True)
         self.thread.start()
 
     def get_current_data(self) -> np.ndarray | None:
@@ -116,6 +137,34 @@ class AudioRecorder:
             recording = recording.flatten()
         return recording
 
+    def get_recent_data(self, max_samples: int = 8000) -> np.ndarray | None:
+        """Get only the most recent audio samples (lightweight, for visualizer).
+
+        Args:
+            max_samples: Maximum number of samples to return.
+
+        Returns:
+            The recent audio data as a 1D numpy array, or None if no data.
+
+        """
+        with self._lock:
+            if not self.frames:
+                return None
+            # Walk backwards through frames to collect enough samples
+            collected: list[np.ndarray] = []
+            total = 0
+            for frame in reversed(self.frames):
+                collected.append(frame)
+                total += len(frame)
+                if total >= max_samples:
+                    break
+
+        collected.reverse()
+        chunk = np.concatenate(collected, axis=0)
+        if self.channels == 1:
+            chunk = chunk.flatten()
+        return chunk[-max_samples:]
+
     def stop(self) -> np.ndarray | None:
         """Stop recording and return audio data as numpy array (float32).
 
@@ -127,7 +176,9 @@ class AudioRecorder:
             return None
 
         self.recording = False
+        self._stop_event.set()
         if self.thread:
-            self.thread.join()
+            self.thread.join(timeout=3.0)
+            self.thread = None
 
         return self.get_current_data()
