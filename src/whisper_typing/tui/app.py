@@ -15,7 +15,7 @@ from textual.widgets import Footer, Header, Label, RichLog, Static
 
 from whisper_typing.app_controller import WhisperAppController
 from whisper_typing.tray_icon import TrayManager
-from whisper_typing.tui.screens import ApiKeyPromptScreen, ConfigurationScreen
+from whisper_typing.tui.screens import ApiKeyPromptScreen, ConfigurationScreen, HistoryScreen
 
 
 class WhisperTui(App[None]):
@@ -70,6 +70,7 @@ class WhisperTui(App[None]):
         Binding("p", "pause", "Pause"),
         Binding("c", "configure", "Configure"),
         Binding("r", "reload", "Reload Config"),
+        Binding("h", "history", "History"),
     ]
 
     status_message: reactive[str] = reactive("Starting...")
@@ -90,6 +91,7 @@ class WhisperTui(App[None]):
             config=controller.config,
             on_config_toggle=self._on_config_toggle,
             on_pause=self._tray_pause,
+            on_history=self._tray_history,
         )
 
     def compose(self) -> ComposeResult:
@@ -287,6 +289,12 @@ class WhisperTui(App[None]):
         """Pause or resume the application."""
         self.controller.toggle_pause()
 
+    @work
+    async def action_history(self) -> None:
+        """Show transcription history screen."""
+        screen = HistoryScreen(self.controller.transcription_history)
+        await self.push_screen_wait(screen)
+
     def _on_config_toggle(self, key: str, value: object) -> None:
         """Handle config toggle from tray menu."""
         from whisper_typing.app_controller import save_config
@@ -322,9 +330,33 @@ class WhisperTui(App[None]):
         """Handle pause from tray icon."""
         self.call_from_thread(self.action_pause)
 
+    def _tray_history(self) -> None:
+        """Handle history from tray icon."""
+        self.call_from_thread(self.action_history)
+
     def _tray_quit(self) -> None:
         """Handle quit from tray icon."""
-        self.call_from_thread(self.action_quit)
+        import os
+        import threading
+
+        # Stop controller directly from tray thread (doesn't need UI event loop)
+        try:
+            self.controller.stop()
+        except Exception:  # noqa: BLE001, S110
+            pass
+
+        # Safety net: force exit after 3s if graceful quit hangs
+        def _force_exit() -> None:
+            import time
+            time.sleep(3)
+            os._exit(0)
+
+        threading.Thread(target=_force_exit, daemon=True).start()
+
+        try:
+            self.call_from_thread(self.action_quit)
+        except Exception:  # noqa: BLE001
+            os._exit(0)
 
     def action_quit(self) -> None:
         """Quit the application."""

@@ -287,6 +287,124 @@ class ConfigurationScreen(Screen[bool]):
             self.dismiss(result=False)  # Return False to indicate no changes
 
 
+class HistoryScreen(ModalScreen[None]):
+    """Screen showing the last 10 transcriptions with copy-to-clipboard."""
+
+    CSS = """
+    HistoryScreen {
+        align: center middle;
+        background: $background 50%;
+    }
+
+    #history_dialog {
+        padding: 1 2;
+        width: 90%;
+        max-width: 100;
+        height: 80%;
+        border: thick $primary;
+        background: $surface;
+    }
+
+    #history_title {
+        text-align: center;
+        text-style: bold;
+        margin-bottom: 1;
+        color: $primary;
+    }
+
+    #history_list {
+        height: 1fr;
+        border: solid $accent;
+        background: $surface;
+        padding: 1;
+        overflow-y: auto;
+    }
+
+    .history_entry {
+        margin-bottom: 1;
+        padding: 0 1;
+    }
+
+    .history_time {
+        color: $accent;
+        text-style: bold;
+    }
+
+    #history_buttons {
+        align: center middle;
+        margin-top: 1;
+    }
+    """
+
+    BINDINGS: ClassVar[list[Binding]] = [
+        Binding("escape", "close", "Close"),
+    ]
+
+    def __init__(self, history: list[tuple[str, str]]) -> None:
+        """Initialize with transcription history.
+
+        Args:
+            history: List of (timestamp, text) tuples, newest first.
+
+        """
+        super().__init__()
+        self.history = history
+
+    def compose(self) -> ComposeResult:
+        """Compose the history screen layout."""
+        from textual.widgets import RichLog
+
+        yield Container(
+            Label("Transcription History (last 10)", id="history_title"),
+            RichLog(id="history_list", markup=True, highlight=True),
+            Horizontal(
+                Button("Copy All", variant="primary", id="history_copy_all_btn"),
+                Button("Close", variant="error", id="history_close_btn"),
+                id="history_buttons",
+            ),
+            id="history_dialog",
+        )
+
+    def on_mount(self) -> None:
+        """Populate the history list."""
+        from textual.widgets import RichLog
+
+        log_widget = self.query_one("#history_list", RichLog)
+        if not self.history:
+            log_widget.write("[dim]No transcriptions yet.[/dim]")
+            return
+
+        for i, (timestamp, text) in enumerate(self.history, 1):
+            log_widget.write(f"[bold blue][{timestamp}][/bold blue] [bold]#{i}[/bold]")
+            log_widget.write(f"  {text}")
+            log_widget.write("")
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        """Handle button press events."""
+        if event.button.id == "history_copy_all_btn":
+            self._copy_all()
+        elif event.button.id == "history_close_btn":
+            self.dismiss(None)
+
+    def action_close(self) -> None:
+        """Close the history screen."""
+        self.dismiss(None)
+
+    def _copy_all(self) -> None:
+        """Copy all history entries to clipboard."""
+        import pyperclip
+
+        if not self.history:
+            self.app.notify("No history to copy", severity="warning")
+            return
+
+        lines = []
+        for timestamp, text in self.history:
+            lines.append(f"[{timestamp}] {text}")
+        pyperclip.copy("\n".join(lines))
+        self.app.notify(f"Copied {len(self.history)} entries to clipboard")
+
+
 class ApiKeyPromptScreen(ModalScreen[str | None]):
     """Screen for prompting the user for a Gemini API key on startup."""
 

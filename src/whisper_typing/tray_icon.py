@@ -50,6 +50,7 @@ class TrayManager:
         config: dict[str, Any] | None = None,
         on_config_toggle: "Callable[[str, bool], None] | None" = None,
         on_pause: "Callable[[], None] | None" = None,
+        on_history: "Callable[[], None] | None" = None,
     ) -> None:
         """Initialize the TrayManager.
 
@@ -58,12 +59,14 @@ class TrayManager:
             config: Reference to the app config dict (for reading toggle states).
             on_config_toggle: Callback(key, new_value) when a config toggle is flipped.
             on_pause: Callback when user clicks Pause/Resume.
+            on_history: Callback when user clicks History.
 
         """
         self._on_quit = on_quit
         self._config = config or {}
         self._on_config_toggle = on_config_toggle
         self._on_pause = on_pause
+        self._on_history = on_history
         self._icon: Icon | None = None
         self._thread: threading.Thread | None = None
         self._current_state = "ready"
@@ -138,6 +141,7 @@ class TrayManager:
             MenuItem("Visualizer Style", Menu(*style_items)),
             MenuItem("Visualizer Color", Menu(*gradient_items)),
             Menu.SEPARATOR,
+            MenuItem("History", self._history_clicked),
             MenuItem(
                 "Pause",
                 self._pause_clicked,
@@ -242,6 +246,10 @@ class TrayManager:
 
     def _make_gradient_checker(self, gradient: str) -> "Callable[[Any], bool]":
         return lambda _: self._config.get("visualizer_gradient", "green_red") == gradient
+
+    def _history_clicked(self, icon: Any, item: Any) -> None:  # noqa: ANN401
+        if self._on_history:
+            self._on_history()
 
     def _pause_clicked(self, icon: Any, item: Any) -> None:  # noqa: ANN401
         if self._on_pause:

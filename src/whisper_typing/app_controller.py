@@ -43,10 +43,14 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "visualizer_style": "bars",
     "visualizer_gradient": "green_red",
     "format_prompt": (
-        "Clean up this spoken transcription. Remove filler words, fix grammar, "
-        "structure into clear sentences/paragraphs. Use markdown formatting if "
-        "the content contains lists, instructions or multiple topics. "
-        "Keep the original language. Output ONLY the cleaned text, no explanations."
+        "You receive raw speech-to-text output. The speaker may switch between "
+        "Russian and English freely, even mid-sentence. Your ONLY job:\n"
+        "1. Remove filler words (uh, um, ну, типа, как бы, вот, это самое, короче, э)\n"
+        "2. Remove accidental word repetitions (stutters)\n"
+        "3. Fix punctuation and capitalization\n"
+        "DO NOT rephrase, summarize, shorten, or change the meaning. "
+        "Keep every meaningful word exactly as spoken. "
+        "Output ONLY the cleaned text, nothing else."
     ),
 }
 
@@ -175,8 +179,12 @@ class WhisperAppController:
         self.target_window_handle: Any | None = None
 
         self.is_processing: bool = False
+        self._processing_start_time: float = 0.0
         self.pending_text: str | None = None
         self.paused: bool = False
+
+        # History of transcriptions (newest first, max 10)
+        self.transcription_history: list[tuple[str, str]] = []  # (timestamp, text)
 
         # State tracking for optimization
         self.current_model_id: str | None = None
@@ -212,6 +220,15 @@ class WhisperAppController:
         """
         if self.on_log:
             self.on_log(message)
+
+    def _add_to_history(self, text: str) -> None:
+        """Add a transcription to the history list (max 10 entries, newest first)."""
+        from datetime import UTC, datetime
+
+        timestamp = datetime.now(UTC).astimezone().strftime("%H:%M:%S")
+        self.transcription_history.insert(0, (timestamp, text))
+        if len(self.transcription_history) > 10:
+            self.transcription_history.pop()
 
     def set_status(self, status: str) -> None:
         """Update the application status using the configured UI callback.
@@ -374,6 +391,9 @@ class WhisperAppController:
                 self.current_device = device
                 self.current_compute_type = compute_type
 
+            # Stop old recorder before creating new one to avoid zombie threads
+            if self.recorder and self.recorder.recording:
+                self.recorder.stop()
             self.recorder = AudioRecorder(device_index=self.current_mic_index)
             self.typer = Typer(wpm=self.config.get("typing_wpm", 40))
             self.improver = AIImprover(
@@ -513,10 +533,26 @@ class WhisperAppController:
             user32.keybd_event(VK_CAPITAL, 0x3A, 0, 0)
             user32.keybd_event(VK_CAPITAL, 0x3A, KEYEVENTF_KEYUP, 0)
 
+    def _defer_caps_lock_off(self) -> None:
+        """Defer CapsLock reset to a separate thread to avoid pynput deadlock.
+
+        keybd_event inside a pynput callback deadlocks the Windows message pump.
+        """
+        if self._is_caps_lock:
+            threading.Thread(target=self._ensure_caps_lock_off, daemon=True).start()
+
     def _on_hold_start(self) -> None:
         """Handle hold key press — start recording."""
-        if self.paused or self.is_processing:
+        self._defer_caps_lock_off()
+        if self.paused:
             return
+        if self.is_processing:
+            # Auto-reset if processing has been stuck for over 60 seconds
+            if time.time() - self._processing_start_time > 60:
+                self.log("Processing timeout — resetting stuck state.")
+                self.is_processing = False
+            else:
+                return
         if not self.recorder:
             self.log("Recorder not initialized.")
             return
@@ -533,6 +569,8 @@ class WhisperAppController:
 
     def _on_hold_release(self) -> None:
         """Handle hold key release — stop recording, transcribe, auto-type."""
+        self._defer_caps_lock_off()
+
         if not self.recorder or not self.recorder.recording:
             return
 
@@ -545,7 +583,23 @@ class WhisperAppController:
         threading.Thread(target=do_release, daemon=True).start()
 
     def stop(self) -> None:
-        """Stop the hotkey listener."""
+        """Stop the application: listeners, recording, live transcription, overlay."""
+        # Stop live transcription thread first
+        self.stop_live_transcribe.set()
+        if self.live_transcribe_thread:
+            self.live_transcribe_thread.join(timeout=3.0)
+            self.live_transcribe_thread = None
+
+        # Stop any active recording
+        if self.recorder and self.recorder.recording:
+            try:
+                self.recorder.stop()
+            except Exception:  # noqa: BLE001, S110
+                pass
+
+        # Stop typing if in progress
+        self.typing_stop_event.set()
+
         if self.listener:
             self.listener.stop()
         if self._hold_listener:
@@ -571,8 +625,13 @@ class WhisperAppController:
             return
 
         if self.is_processing:
-            self.log("Busy processing, ignoring record toggle.")
-            return
+            # Auto-reset if processing has been stuck for over 60 seconds
+            if time.time() - self._processing_start_time > 60:
+                self.log("Processing timeout — resetting stuck state.")
+                self.is_processing = False
+            else:
+                self.log("Busy processing, ignoring record toggle.")
+                return
 
         if not self.recorder:
             self.log("Recorder not initialized.")
@@ -616,7 +675,10 @@ class WhisperAppController:
         # Stop live transcription loop
         self.stop_live_transcribe.set()
         if self.live_transcribe_thread:
-            self.live_transcribe_thread.join()
+            self.live_transcribe_thread.join(timeout=5.0)
+            if self.live_transcribe_thread.is_alive():
+                self.log("Warning: live transcription thread did not stop in time")
+            self.live_transcribe_thread = None
 
         if not self.recorder:
             return
@@ -625,6 +687,7 @@ class WhisperAppController:
 
         if audio_data is not None:
             self.is_processing = True
+            self._processing_start_time = time.time()
 
             def process_audio() -> None:
                 try:
@@ -632,6 +695,7 @@ class WhisperAppController:
                         text = self.transcriber.transcribe(audio_data)
                         if text:
                             self.pending_text = text
+                            self._add_to_history(text)
                             self.log(f"Transcribed: {text}")
                             if self.on_preview_update:
                                 self.on_preview_update(text, None)
@@ -645,7 +709,7 @@ class WhisperAppController:
                 finally:
                     self.is_processing = False
 
-            threading.Thread(target=process_audio).start()
+            threading.Thread(target=process_audio, daemon=True).start()
         else:
             self.log("No audio data.")
             self.set_status("Ready")
@@ -659,7 +723,10 @@ class WhisperAppController:
         # Stop live transcription loop
         self.stop_live_transcribe.set()
         if self.live_transcribe_thread:
-            self.live_transcribe_thread.join()
+            self.live_transcribe_thread.join(timeout=5.0)
+            if self.live_transcribe_thread.is_alive():
+                self.log("Warning: live transcription thread did not stop in time")
+            self.live_transcribe_thread = None
 
         if not self.recorder:
             self.overlay.hide()
@@ -669,6 +736,7 @@ class WhisperAppController:
 
         if audio_data is not None:
             self.is_processing = True
+            self._processing_start_time = time.time()
 
             def process_and_type() -> None:
                 try:
@@ -698,6 +766,8 @@ class WhisperAppController:
                                         if self.on_preview_update:
                                             self.on_preview_update(text, original)
 
+                            self._add_to_history(text)
+
                             # Auto-type if enabled
                             if self.config.get("auto_type", False):
                                 self.set_status("Typing")
@@ -714,82 +784,82 @@ class WhisperAppController:
                     self.is_processing = False
                     self.overlay.hide()
 
-            threading.Thread(target=process_and_type).start()
+            threading.Thread(target=process_and_type, daemon=True).start()
         else:
             self.log("No audio data.")
             self.overlay.hide()
             self.set_status("Ready")
 
     def _auto_type_text(self, text: str) -> None:
-        """Instantly paste text into the active window via clipboard."""
+        """Auto-paste transcribed text into active window + keep in clipboard as backup."""
         import pyperclip
 
+        # Always copy to clipboard as backup
+        pyperclip.copy(text)
+
+        # Refocus the target window where recording started
+        do_refocus = self.config.get("refocus_window", True)
+        if do_refocus and self.window_manager and self.target_window_handle:
+            if not self.window_manager.focus_window(self.target_window_handle):
+                self.log(f"Clipboard ({len(text)} chars). Could not refocus — Ctrl+V to paste.")
+                self.set_status("Ready")
+                return
+            time.sleep(0.15)
+
+        # Simulate Ctrl+V via Windows API directly (pynput Controller
+        # conflicts with the active CapsLock suppress listener)
         user32 = ctypes.windll.user32
         VK_CONTROL = 0x11
         VK_V = 0x56
         KEYEVENTF_KEYUP = 0x0002
 
-        # Save current clipboard content
-        try:
-            old_clipboard = pyperclip.paste()
-        except Exception:  # noqa: BLE001
-            old_clipboard = ""
-
-        # Force-focus the window where recording started
-        if self.target_window_handle and hasattr(self.target_window_handle, "_hWnd"):
-            hwnd = self.target_window_handle._hWnd  # noqa: SLF001
-            user32.SetForegroundWindow(hwnd)
-            time.sleep(0.15)
-
-        # Copy text to clipboard
-        pyperclip.copy(text)
-        time.sleep(0.05)
-
-        # Ctrl+V via low-level Windows API
         user32.keybd_event(VK_CONTROL, 0, 0, 0)
         user32.keybd_event(VK_V, 0, 0, 0)
+        time.sleep(0.05)
         user32.keybd_event(VK_V, 0, KEYEVENTF_KEYUP, 0)
         user32.keybd_event(VK_CONTROL, 0, KEYEVENTF_KEYUP, 0)
-        time.sleep(0.1)
 
-        # Restore previous clipboard content
-        try:
-            pyperclip.copy(old_clipboard)
-        except Exception:  # noqa: BLE001
-            pass
-
-        self.log("Pasted.")
+        self.log(f"Auto-pasted ({len(text)} chars). Also in clipboard.")
         self.set_status("Ready")
 
     def _live_transcription_loop(self) -> None:
-        """Periodically transcribe the current audio buffer during recording."""
-        last_transcription_time = time.time()
-        while not self.stop_live_transcribe.is_set():
-            time.sleep(0.5)  # Update interval
+        """Periodically transcribe a recent audio window during recording.
 
-            throttle_limit = 0.8
-            if (
-                time.time() - last_transcription_time < throttle_limit
-            ):  # Throttle to ~1s
+        Only transcribes the last ~10 seconds of audio (not the full buffer)
+        using greedy decoding (beam_size=1) for speed.
+        """
+        last_transcription_time = time.time()
+        # Max samples to transcribe live: ~5 seconds at 16kHz (keep short for responsiveness)
+        max_preview_samples = 16000 * 5
+        while not self.stop_live_transcribe.is_set():
+            # Use wait() instead of sleep() so thread responds immediately to stop
+            if self.stop_live_transcribe.wait(timeout=1.0):
+                break
+
+            throttle_limit = 2.0
+            if time.time() - last_transcription_time < throttle_limit:
                 continue
 
             if not self.recorder or not self.transcriber:
                 continue
 
-            audio_data = self.recorder.get_current_data()
-            audio_buffer_min_len = 8000
-            if (
-                audio_data is not None and len(audio_data) > audio_buffer_min_len
-            ):  # At least 0.5s of audio
+            if self.stop_live_transcribe.is_set():
+                break
+
+            audio_data = self.recorder.get_recent_data(max_samples=max_preview_samples)
+            audio_buffer_min_len = 16000  # At least 1s of audio
+            if audio_data is not None and len(audio_data) > audio_buffer_min_len:
                 try:
-                    text = self.transcriber.transcribe(audio_data)
+                    text = self.transcriber.transcribe_fast(audio_data)
+                    if self.stop_live_transcribe.is_set():
+                        break
+                    # Only update preview if we got real text (not empty/hallucination)
                     if text and text != self.pending_text:
                         self.pending_text = text
                         if self.on_preview_update:
                             self.on_preview_update(text, None)
                     last_transcription_time = time.time()
                 except Exception:  # noqa: BLE001, S110
-                    # Don't log errors too frequently in the loop
                     pass
 
     def on_type_confirm(self) -> None:
@@ -889,6 +959,6 @@ class WhisperAppController:
                 finally:
                     self.is_processing = False
 
-            threading.Thread(target=run_improve).start()
+            threading.Thread(target=run_improve, daemon=True).start()
         else:
             self.log("No text to improve.")
