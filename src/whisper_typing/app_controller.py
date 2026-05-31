@@ -206,6 +206,13 @@ class WhisperAppController:
 
         # Hold-to-talk state
         self._hold_listener: keyboard.Listener | None = None
+        # CapsLock "always OFF" enforcement (see _setup_hold_listener,
+        # _ensure_caps_lock_off, _start_caps_watchdog).
+        self._caps_passthrough_until: float = 0.0
+        # Ignore the echo of our own injected CapsLock-off keystroke so it
+        # isn't read as a real hold (which would start a phantom recording).
+        self._caps_synth_until: float = 0.0
+        self._caps_watchdog_stop: threading.Event = threading.Event()
         self._hold_key: Any = None
         self._hold_key_pressed: bool = False
         self._we_paused_media: bool = False
@@ -478,23 +485,35 @@ class WhisperAppController:
         self._is_caps_lock = hotkey_str == "caps_lock"
 
         def on_press(key: Any) -> None:  # noqa: ANN401
+            # Ignore the echo of our own synthetic CapsLock-off keystroke.
+            if time.monotonic() < self._caps_synth_until:
+                return
             if key == self._hold_key and not self._hold_key_pressed:
                 self._hold_key_pressed = True
                 self._on_hold_start()
 
         def on_release(key: Any) -> None:  # noqa: ANN401
+            # Ignore the echo of our own synthetic CapsLock-off keystroke.
+            if time.monotonic() < self._caps_synth_until:
+                return
             if key == self._hold_key and self._hold_key_pressed:
                 self._hold_key_pressed = False
                 self._on_hold_release()
 
         if self._is_caps_lock:
-            # Force CapsLock OFF at startup
+            # Force CapsLock OFF at startup, then keep it OFF as a hard rule.
             self._ensure_caps_lock_off()
+            self._start_caps_watchdog()
 
             # Suppress CapsLock so it doesn't toggle caps or show OSD
             def win32_event_filter(msg: int, data: Any) -> bool:  # noqa: ANN401
                 if hasattr(data, "vkCode") and data.vkCode == 0x14:  # VK_CAPITAL
-                    self._hold_listener._suppress = True  # noqa: SLF001
+                    # Suppress CapsLock so the hold key never flips the OS
+                    # lock state, except during the brief pass-through window
+                    # opened by _ensure_caps_lock_off (our own off-keystroke).
+                    self._hold_listener._suppress = (  # noqa: SLF001
+                        time.monotonic() >= self._caps_passthrough_until
+                    )
                 else:
                     self._hold_listener._suppress = False  # noqa: SLF001
                 return True
@@ -521,17 +540,41 @@ class WhisperAppController:
             self.log("Recording cancelled.")
             self.set_status("Ready")
 
-    @staticmethod
-    def _ensure_caps_lock_off() -> None:
+    def _ensure_caps_lock_off(self) -> None:
         """Force CapsLock to OFF state if it's currently ON."""
         user32 = ctypes.windll.user32
         VK_CAPITAL = 0x14
         KEYEVENTF_KEYUP = 0x0002
         # GetKeyState bit 0 = toggled ON
         if user32.GetKeyState(VK_CAPITAL) & 1:
+            # Briefly let CapsLock through the suppress filter so our OWN
+            # injected keystroke actually reaches the OS and flips the lock
+            # OFF. Without this the win32_event_filter eats it and CapsLock
+            # stays stuck ON.
+            self._caps_passthrough_until = time.monotonic() + 0.15
+            self._caps_synth_until = time.monotonic() + 0.15
             # Simulate press+release to toggle it OFF
             user32.keybd_event(VK_CAPITAL, 0x3A, 0, 0)
             user32.keybd_event(VK_CAPITAL, 0x3A, KEYEVENTF_KEYUP, 0)
+
+    def _start_caps_watchdog(self) -> None:
+        """Enforce 'CapsLock always OFF' while the app runs.
+
+        CapsLock (the hold key) is suppressed so it can't toggle the lock;
+        this watchdog flips it back off if anything else turns it on. Daemon
+        thread (dies with the process); keybd_event must not run inside a
+        pynput callback, so a dedicated thread is required.
+        """
+
+        def _loop() -> None:
+            while not self._caps_watchdog_stop.wait(0.2):
+                try:
+                    if ctypes.windll.user32.GetKeyState(0x14) & 1:  # VK_CAPITAL ON
+                        self._ensure_caps_lock_off()
+                except Exception:  # noqa: BLE001
+                    pass
+
+        threading.Thread(target=_loop, daemon=True).start()
 
     def _defer_caps_lock_off(self) -> None:
         """Defer CapsLock reset to a separate thread to avoid pynput deadlock.
