@@ -133,11 +133,21 @@ class PersistentHistory:
         except Exception as e:  # noqa: BLE001
             get_logger().warning("history load failed: %s", e)
             self._entries = []
+            # Preserve the unreadable file for manual recovery instead of
+            # silently overwriting it on the next save.
+            try:
+                HISTORY_PATH.replace(HISTORY_PATH.with_suffix(".json.corrupt"))
+            except Exception:  # noqa: BLE001, S110
+                pass
 
     def _save(self) -> None:
         try:
-            with HISTORY_PATH.open("w", encoding="utf-8") as f:
+            # Atomic write: a process kill mid-save must never leave a
+            # truncated history.json behind.
+            tmp = HISTORY_PATH.with_suffix(".json.tmp")
+            with tmp.open("w", encoding="utf-8") as f:
                 json.dump(self._entries, f, ensure_ascii=False, indent=2)
+            tmp.replace(HISTORY_PATH)
         except Exception as e:  # noqa: BLE001
             get_logger().warning("history save failed: %s", e)
 

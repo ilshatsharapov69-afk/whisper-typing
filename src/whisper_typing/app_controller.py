@@ -14,7 +14,7 @@ from pynput import keyboard
 
 from whisper_typing.ai_improver import AIImprover
 from whisper_typing.audio_capture import AudioRecorder
-from whisper_typing.diagnostics import PersistentHistory, save_audio_backup
+from whisper_typing.diagnostics import PersistentHistory, get_logger, save_audio_backup
 from whisper_typing.overlay import AudioOverlay
 from whisper_typing.transcriber import Transcriber
 from whisper_typing.typer import Typer
@@ -99,64 +99,90 @@ def save_config(config: dict[str, Any], config_path: str = "config.json") -> Non
 class MediaController:
     """Pause/resume media using Windows SMTC (System Media Transport Controls).
 
-    Uses try_pause_async / try_play_async — explicit commands, not toggle.
-    Correctly detects Playing vs Paused state via playback_status.
+    Pauses EVERY playing session, not just the "current" one — with several
+    media apps open (browser tabs + player) Windows often reports a session
+    that is not the one actually audible, which made pausing look random.
+    Resumes exactly the sessions it paused. Every call is bounded by a
+    timeout and never raises.
     """
+
+    _TIMEOUT_S: float = 3.0
 
     def __init__(self, logger: "Callable[[str], None] | None" = None) -> None:
         self._log = logger or (lambda _: None)
-        self._we_paused: bool = False
+        # source_app_user_model_ids of the sessions we paused
+        self._paused_ids: list[str] = []
 
     def pause_if_playing(self) -> bool:
-        """Pause media if currently playing. Returns True if we paused."""
+        """Pause all playing media sessions. Returns True if we paused any."""
         import asyncio
 
         try:
-            return asyncio.run(self._async_pause_if_playing())
-        except Exception as e:
+            count = asyncio.run(
+                asyncio.wait_for(self._async_pause_all(), self._TIMEOUT_S)
+            )
+        except Exception as e:  # noqa: BLE001
             self._log(f"MediaController pause error: {e}")
             return False
+        return count > 0
 
     def resume(self) -> None:
-        """Resume media if we previously paused it."""
+        """Resume the sessions we previously paused."""
         import asyncio
 
         try:
-            asyncio.run(self._async_resume())
-        except Exception as e:
+            asyncio.run(asyncio.wait_for(self._async_resume_all(), self._TIMEOUT_S))
+        except Exception as e:  # noqa: BLE001
             self._log(f"MediaController resume error: {e}")
 
-    async def _async_pause_if_playing(self) -> bool:
+    async def _get_sessions(self) -> list[Any]:
         from winrt.windows.media.control import (
             GlobalSystemMediaTransportControlsSessionManager as Mgr,
         )
 
         manager = await Mgr.request_async()
-        session = manager.get_current_session()
-        if not session:
-            self._log("No media session found.")
-            return False
+        try:
+            return list(manager.get_sessions())
+        except Exception:  # noqa: BLE001
+            # Fallback for older winrt projections without get_sessions
+            session = manager.get_current_session()
+            return [session] if session else []
 
-        info = session.get_playback_info()
-        # PlaybackStatus: 4=Playing, 5=Paused
-        if info.playback_status == 4:
-            result = await session.try_pause_async()
-            self._log(f"Media paused (success={result}).")
-            return bool(result)
+    async def _async_pause_all(self) -> int:
+        sessions = await self._get_sessions()
+        self._paused_ids = []
+        count = 0
+        for session in sessions:
+            try:
+                info = session.get_playback_info()
+                # PlaybackStatus: 4=Playing, 5=Paused
+                if info.playback_status != 4:
+                    continue
+                if await session.try_pause_async():
+                    sid = getattr(session, "source_app_user_model_id", "") or ""
+                    self._paused_ids.append(sid)
+                    count += 1
+            except Exception:  # noqa: BLE001, S112
+                continue
+        if count:
+            self._log(f"Media paused ({count} session(s)).")
+        return count
 
-        self._log(f"Media not playing (status={info.playback_status}) — skipping.")
-        return False
-
-    async def _async_resume(self) -> None:
-        from winrt.windows.media.control import (
-            GlobalSystemMediaTransportControlsSessionManager as Mgr,
-        )
-
-        manager = await Mgr.request_async()
-        session = manager.get_current_session()
-        if session:
-            result = await session.try_play_async()
-            self._log(f"Media resumed (success={result}).")
+    async def _async_resume_all(self) -> None:
+        if not self._paused_ids:
+            return
+        sessions = await self._get_sessions()
+        resumed = 0
+        for session in sessions:
+            try:
+                sid = getattr(session, "source_app_user_model_id", "") or ""
+                if sid in self._paused_ids:
+                    if await session.try_play_async():
+                        resumed += 1
+            except Exception:  # noqa: BLE001, S112
+                continue
+        self._log(f"Media resumed ({resumed}/{len(self._paused_ids)} session(s)).")
+        self._paused_ids = []
 
     def stop(self) -> None:
         """Nothing to clean up."""
@@ -220,16 +246,31 @@ class WhisperAppController:
         # previous stop to finish, otherwise recorder.start() sees
         # recording=True and silently swallows the new take.
         self._ptt_lock: threading.Lock = threading.Lock()
+        # Increments on every PTT start; a media-pause that completes after
+        # its take already ended must not mark (or leave) media paused.
+        self._ptt_gen: int = 0
         self._we_paused_media: bool = False
         self._media: MediaController | None = None
+        # Self-healing keyboard-hook supervisor
+        self._probe_seen: threading.Event = threading.Event()
+        self._supervisor_stop: threading.Event = threading.Event()
+        self._supervisor_thread: threading.Thread | None = None
 
     def log(self, message: str) -> None:
-        """Log a message using the configured UI callback.
+        """Log a message to the file log and the UI callback.
+
+        The file log matters more than the TUI one: with
+        whisper-typing-silent.vbs the TUI is invisible, so _app.log is the
+        only place failures can actually be seen.
 
         Args:
             message: The message to log.
 
         """
+        try:
+            get_logger().info(message)
+        except Exception:  # noqa: BLE001, S110
+            pass
         if self.on_log:
             self.on_log(message)
 
@@ -446,31 +487,117 @@ class WhisperAppController:
             if record_mode == "hold":
                 # Hold-to-talk mode: use Listener for press/release detection
                 self._setup_hold_listener()
-                # Still register type/improve hotkeys via GlobalHotKeys
-                self.listener = keyboard.GlobalHotKeys(
-                    {
-                        self.config["type_hotkey"]: self.on_type_confirm,
-                        self.config["improve_hotkey"]: self.on_improve_text,
-                    }
-                )
-                self.listener.start()
+                self._start_global_hotkeys()
                 hotkey_name = self.config["hotkey"]
                 self.log(f"Hold-to-talk mode. Hold {hotkey_name} to record, release to transcribe+type.")
             else:
-                # Toggle mode (original behavior)
-                self.listener = keyboard.GlobalHotKeys(
-                    {
-                        self.config["hotkey"]: self.on_record_toggle,
-                        self.config["type_hotkey"]: self.on_type_confirm,
-                        self.config["improve_hotkey"]: self.on_improve_text,
-                    }
-                )
-                self.listener.start()
+                self._start_global_hotkeys()
                 self.log(f"Hotkeys registered. Press {self.config['hotkey']} to record.")
+            self._start_supervisor()
             self.set_status("Ready")
         except ValueError as e:
             self.log(f"Invalid hotkey format: {e}")
             self.set_status("Hotkey Error")
+
+    def _start_global_hotkeys(self) -> None:
+        """(Re)start the GlobalHotKeys listener for the current record_mode."""
+        if self.listener:
+            try:
+                self.listener.stop()
+            except Exception:  # noqa: BLE001, S110
+                pass
+        mapping = {
+            self.config["type_hotkey"]: self.on_type_confirm,
+            self.config["improve_hotkey"]: self.on_improve_text,
+        }
+        if self.config.get("record_mode", "toggle") != "hold":
+            mapping[self.config["hotkey"]] = self.on_record_toggle
+        self.listener = keyboard.GlobalHotKeys(mapping)
+        self.listener.start()
+
+    def _start_supervisor(self) -> None:
+        """Start the self-healing watchdog thread (idempotent)."""
+        self._supervisor_stop.clear()
+        if self._supervisor_thread and self._supervisor_thread.is_alive():
+            return
+        self._supervisor_thread = threading.Thread(
+            target=self._supervisor_loop, daemon=True
+        )
+        self._supervisor_thread.start()
+
+    def _supervisor_loop(self) -> None:
+        """Watchdog: detect and revive dead keyboard listeners.
+
+        Covers the two ways the PTT key silently stops working:
+        - a listener thread died (unhandled exception inside pynput) —
+          detected via ``.running``;
+        - Windows silently removed the low-level hook (it does this when a
+          hook callback exceeds the OS timeout under load; nothing is raised
+          and the thread still looks healthy) — detected by injecting a
+          harmless F24 keystroke that win32_event_filter must acknowledge.
+        """
+        user32 = ctypes.windll.user32
+        vk_probe = 0x87  # F24
+        keyeventf_keyup = 0x0002
+
+        class LastInputInfo(ctypes.Structure):
+            _fields_ = (("cbSize", ctypes.c_uint), ("dwTime", ctypes.c_uint))
+
+        def idle_seconds() -> float:
+            info = LastInputInfo()
+            info.cbSize = ctypes.sizeof(info)
+            if not user32.GetLastInputInfo(ctypes.byref(info)):
+                return 0.0
+            return (ctypes.windll.kernel32.GetTickCount() - info.dwTime) / 1000.0
+
+        while not self._supervisor_stop.wait(30.0):
+            try:
+                if self.paused:
+                    continue
+                # Never interfere mid-take
+                if self._pressed_hold_keys or (self.recorder and self.recorder.recording):
+                    continue
+                if self.listener and not self.listener.running:
+                    self._heal("hotkey listener thread died")
+                    continue
+                if self._hold_listener is None:
+                    continue
+                if not self._hold_listener.running:
+                    self._heal("hold listener thread died")
+                    continue
+                # Probe only while the user is actively at the machine: the
+                # injected keystroke resets the OS idle timer, and probing an
+                # idle machine would keep the display awake forever.
+                if idle_seconds() > 60.0:
+                    continue
+                self._probe_seen.clear()
+                user32.keybd_event(vk_probe, 0, 0, 0)
+                user32.keybd_event(vk_probe, 0, keyeventf_keyup, 0)
+                if not self._probe_seen.wait(1.0):
+                    self._heal("keyboard hook unresponsive (silent unhook)")
+            except Exception as e:  # noqa: BLE001
+                try:
+                    get_logger().warning("supervisor error: %s", e)
+                except Exception:  # noqa: BLE001, S110
+                    pass
+
+    def _heal(self, reason: str) -> None:
+        """Reinstall keyboard listeners after a detected failure."""
+        if self._pressed_hold_keys or (self.recorder and self.recorder.recording):
+            return  # a take just started — try again next cycle
+        self.log(f"Self-heal: {reason} — reinstalling hotkey listeners.")
+        try:
+            if self._hold_listener:
+                self._hold_listener.stop()
+        except Exception:  # noqa: BLE001, S110
+            pass
+        try:
+            if self.config.get("record_mode", "toggle") == "hold":
+                self._setup_hold_listener()
+            self._start_global_hotkeys()
+            self.log("Hotkey listeners reinstalled.")
+        except Exception as e:  # noqa: BLE001
+            self.log(f"Self-heal failed: {e}")
 
     def _setup_hold_listener(self) -> None:
         """Set up the keyboard listener for hold-to-talk mode.
@@ -520,27 +647,37 @@ class WhisperAppController:
             if key in self._hold_keys:
                 self._release_hold_key(key)
 
-        if self._hold_caps or self._hold_numpad_enter:
-            if self._hold_caps:
-                # One-time: clear CapsLock now, before the hook starts
-                # suppressing it — otherwise a lock that was already ON would
-                # be stuck ON for the whole session.
-                self._ensure_caps_lock_off()
+        if self._hold_caps:
+            # One-time: clear CapsLock now, before the hook starts
+            # suppressing it — otherwise a lock that was already ON would
+            # be stuck ON for the whole session.
+            self._ensure_caps_lock_off()
 
-            wm_keydown, wm_syskeydown = 0x0100, 0x0104
-            wm_keyup, wm_syskeyup = 0x0101, 0x0105
-            vk_return, vk_capital = 0x0D, 0x14
-            llkhf_extended, llkhf_injected = 0x01, 0x10
+        wm_keydown, wm_syskeydown = 0x0100, 0x0104
+        wm_keyup, wm_syskeyup = 0x0101, 0x0105
+        vk_return, vk_capital, vk_probe = 0x0D, 0x14, 0x87  # 0x87 = F24
+        llkhf_extended, llkhf_injected = 0x01, 0x10
 
-            def win32_event_filter(msg: int, data: Any) -> bool:  # noqa: ANN401
+        def win32_event_filter(msg: int, data: Any) -> bool:  # noqa: ANN401
+            # Any exception here would kill the pynput listener thread and
+            # leave the PTT key silently dead — fail open instead.
+            try:
                 vk = getattr(data, "vkCode", None)
+                # Liveness probe from the supervisor: acknowledge and swallow.
+                if vk == vk_probe:
+                    self._probe_seen.set()
+                    self._hold_listener._suppress = True  # noqa: SLF001
+                    return False
                 # Numpad Enter = VK_RETURN with the extended-key flag. The
                 # callback only ever sees a generic Key.enter and couldn't tell
                 # it from the main Enter, so drive recording here and swallow it.
+                # Injected (synthetic) Enters from other automation tools are
+                # ignored — only the physical key drives recording.
                 if (
                     self._hold_numpad_enter
                     and vk == vk_return
                     and (data.flags & llkhf_extended)
+                    and not (data.flags & llkhf_injected)
                 ):
                     self._hold_listener._suppress = True  # noqa: SLF001
                     if msg in (wm_keydown, wm_syskeydown):
@@ -558,17 +695,18 @@ class WhisperAppController:
                     return True
                 self._hold_listener._suppress = False  # noqa: SLF001
                 return True
+            except Exception:  # noqa: BLE001
+                try:
+                    self._hold_listener._suppress = False  # noqa: SLF001
+                except Exception:  # noqa: BLE001, S110
+                    pass
+                return True
 
-            self._hold_listener = keyboard.Listener(
-                on_press=on_press,
-                on_release=on_release,
-                win32_event_filter=win32_event_filter,
-            )
-        else:
-            self._hold_listener = keyboard.Listener(
-                on_press=on_press,
-                on_release=on_release,
-            )
+        self._hold_listener = keyboard.Listener(
+            on_press=on_press,
+            on_release=on_release,
+            win32_event_filter=win32_event_filter,
+        )
         self._hold_listener.start()
 
     def _press_hold_key(self, ident: Any) -> None:  # noqa: ANN401
@@ -634,15 +772,32 @@ class WhisperAppController:
                 if not self.recorder or self.recorder.recording:
                     return
                 self._we_paused_media = False
-                if self.config.get("pause_media", True) and self._media:
-                    self._we_paused_media = self._media.pause_if_playing()
+                self._ptt_gen += 1
+                # Recording starts FIRST — the SMTC media pause can take
+                # hundreds of ms and must never delay capturing speech.
                 self._start_recording()
-            # Key already released while we were starting (quick tap during
-            # the media-pause window) — stop now, or recording runs forever.
+                if self.config.get("pause_media", True) and self._media:
+                    threading.Thread(
+                        target=self._pause_media_bg, args=(self._ptt_gen,), daemon=True
+                    ).start()
+            # Key already released while we were starting (quick tap) —
+            # stop now, or recording runs forever.
             if not self._pressed_hold_keys:
                 self._do_ptt_stop()
 
         threading.Thread(target=do_start, daemon=True).start()
+
+    def _pause_media_bg(self, gen: int) -> None:
+        """Pause media in parallel with an already-running recording."""
+        if not self._media:
+            return
+        if not self._media.pause_if_playing():
+            return
+        if gen == self._ptt_gen and self.recorder and self.recorder.recording:
+            self._we_paused_media = True
+        else:
+            # The take already ended (quick tap) — undo the late pause.
+            self._media.resume()
 
     def _on_hold_release(self) -> None:
         """Handle hold key release — stop recording, transcribe, auto-type."""
@@ -651,15 +806,48 @@ class WhisperAppController:
     def _do_ptt_stop(self) -> None:
         """Stop the PTT recording (serialized against starts via _ptt_lock)."""
         with self._ptt_lock:
-            if not self.recorder or not self.recorder.recording:
+            if not self.recorder:
+                return
+            # Also proceed when the stream died mid-take (recording=False but
+            # the live-preview thread is still up) so overlay/threads get
+            # cleaned up and the failure lands in history.
+            stream_died = (
+                self.live_transcribe_thread is not None
+                and self.live_transcribe_thread.is_alive()
+            )
+            if not self.recorder.recording and not stream_died:
                 return
             if self._we_paused_media and self._media:
                 self._media.resume()
                 self._we_paused_media = False
             self._stop_recording_and_type()
 
+    def _verify_mic_alive(self) -> None:
+        """Self-heal: confirm the mic stream actually delivers audio.
+
+        sd.InputStream can fail to open (device busy, USB hiccup) while the
+        UI happily shows "Recording". Detect that shortly after start and
+        restart the stream once; a persistent failure surfaces on release
+        as an error entry in history.
+        """
+        time.sleep(0.7)
+        with self._ptt_lock:
+            rec = self.recorder
+            if not rec or not rec.recording:
+                return  # take already ended — nothing to verify
+            if rec.last_error is None and rec.frames:
+                return  # healthy: stream is delivering frames
+            err = rec.last_error or "no frames from microphone"
+            self.log(f"Mic stream dead at start ({err}) — restarting stream.")
+            rec.stop()
+            # Restart while the take is still wanted: PTT key held, or
+            # toggle mode (where recording runs until toggled off).
+            if self._pressed_hold_keys or self.config.get("record_mode", "toggle") != "hold":
+                rec.start()
+
     def stop(self) -> None:
         """Stop the application: listeners, recording, live transcription, overlay."""
+        self._supervisor_stop.set()
         # Stop live transcription thread first
         self.stop_live_transcribe.set()
         if self.live_transcribe_thread:
@@ -733,6 +921,7 @@ class WhisperAppController:
             self.recorder.start()
             # Show audio visualizer overlay
             self.overlay.show(self.recorder)
+            threading.Thread(target=self._verify_mic_alive, daemon=True).start()
         self.set_status("Recording")
         self.log("Recording started...")
 
@@ -887,7 +1076,9 @@ class WhisperAppController:
 
             threading.Thread(target=process_and_type, daemon=True).start()
         else:
-            self.log("No audio data.")
+            err = self.recorder.last_error if self.recorder else None
+            self._add_to_history("", status="error", error=err or "no audio captured")
+            self.log(f"No audio data ({err or 'unknown reason'}).")
             self.overlay.hide()
             self.set_status("Ready")
 
