@@ -14,6 +14,7 @@ from pynput import keyboard
 
 from whisper_typing.ai_improver import AIImprover
 from whisper_typing.audio_capture import AudioRecorder
+from whisper_typing.diagnostics import PersistentHistory, save_audio_backup
 from whisper_typing.overlay import AudioOverlay
 from whisper_typing.transcriber import Transcriber
 from whisper_typing.typer import Typer
@@ -24,6 +25,7 @@ if TYPE_CHECKING:
 
 DEFAULT_CONFIG: dict[str, Any] = {
     "hotkey": "<f8>",
+    "extra_hotkeys": [],
     "type_hotkey": "<f9>",
     "improve_hotkey": "<f10>",
     "model": "openai/whisper-base",
@@ -183,8 +185,10 @@ class WhisperAppController:
         self.pending_text: str | None = None
         self.paused: bool = False
 
-        # History of transcriptions (newest first, max 10)
-        self.transcription_history: list[tuple[str, str]] = []  # (timestamp, text)
+        # History of transcriptions: persisted to history.json (survives
+        # restarts, keeps failures + wav backup paths); in-memory view = last 10.
+        self._persistent_history: PersistentHistory = PersistentHistory()
+        self.transcription_history: list[tuple[str, str]] = self._persistent_history.recent(10)
 
         # State tracking for optimization
         self.current_model_id: str | None = None
@@ -204,17 +208,18 @@ class WhisperAppController:
         self.typing_stop_event: threading.Event = threading.Event()
         self._is_typing: bool = False
 
-        # Hold-to-talk state
+        # Hold-to-talk state. Recording runs while any registered push-to-talk
+        # key is held (multi-key: e.g. CapsLock on the left + numpad Enter on
+        # the right). Start on the first key down, stop on the last key up.
         self._hold_listener: keyboard.Listener | None = None
-        # CapsLock "always OFF" enforcement (see _setup_hold_listener,
-        # _ensure_caps_lock_off, _start_caps_watchdog).
-        self._caps_passthrough_until: float = 0.0
-        # Ignore the echo of our own injected CapsLock-off keystroke so it
-        # isn't read as a real hold (which would start a phantom recording).
-        self._caps_synth_until: float = 0.0
-        self._caps_watchdog_stop: threading.Event = threading.Event()
-        self._hold_key: Any = None
-        self._hold_key_pressed: bool = False
+        self._hold_keys: set[Any] = set()  # pynput Key objects matched in the callbacks
+        self._hold_caps: bool = False  # CapsLock is a PTT key (needs OS-toggle suppression)
+        self._hold_numpad_enter: bool = False  # numpad Enter is a PTT key (handled in the hook filter)
+        self._pressed_hold_keys: set[Any] = set()  # PTT keys currently held down
+        # Serializes PTT start/stop: a quick re-press must wait for the
+        # previous stop to finish, otherwise recorder.start() sees
+        # recording=True and silently swallows the new take.
+        self._ptt_lock: threading.Lock = threading.Lock()
         self._we_paused_media: bool = False
         self._media: MediaController | None = None
 
@@ -228,14 +233,16 @@ class WhisperAppController:
         if self.on_log:
             self.on_log(message)
 
-    def _add_to_history(self, text: str) -> None:
-        """Add a transcription to the history list (max 10 entries, newest first)."""
-        from datetime import UTC, datetime
-
-        timestamp = datetime.now(UTC).astimezone().strftime("%H:%M:%S")
-        self.transcription_history.insert(0, (timestamp, text))
-        if len(self.transcription_history) > 10:
-            self.transcription_history.pop()
+    def _add_to_history(
+        self,
+        text: str,
+        status: str = "ok",
+        audio_path: str | None = None,
+        error: str | None = None,
+    ) -> None:
+        """Record a transcription (or failure) in history.json and refresh the in-memory view."""
+        self._persistent_history.add(text, status=status, audio_path=audio_path, error=error)
+        self.transcription_history = self._persistent_history.recent(10)
 
     def set_status(self, status: str) -> None:
         """Update the application status using the configured UI callback.
@@ -466,56 +473,90 @@ class WhisperAppController:
             self.set_status("Hotkey Error")
 
     def _setup_hold_listener(self) -> None:
-        """Set up keyboard listener for hold-to-talk mode."""
-        hotkey_str = self.config["hotkey"]
-        # Map config string to pynput Key and Windows VK code
+        """Set up the keyboard listener for hold-to-talk mode.
+
+        Supports several push-to-talk keys at once (config ``hotkey`` plus
+        ``extra_hotkeys``); recording runs while any of them is held.
+
+        Two keys need low-level-hook handling and get a ``win32_event_filter``:
+        - ``caps_lock`` is suppressed system-wide so it can never flip the OS
+          CapsLock state, while still driving recording through the callbacks.
+        - ``numpad_enter`` shares its virtual-key code (VK_RETURN) with the main
+          Enter and can only be told apart by the extended-key flag in the hook,
+          so it is handled in the filter and swallowed (no stray newline/submit).
+        """
+        # pynput Key for the plain (non-special) PTT keys.
         key_map = {
-            "alt_l": (keyboard.Key.alt_l, 0xA4),
-            "alt_r": (keyboard.Key.alt_r, 0xA5),
-            "ctrl_l": (keyboard.Key.ctrl_l, 0xA2),
-            "ctrl_r": (keyboard.Key.ctrl_r, 0xA3),
-            "shift_l": (keyboard.Key.shift_l, 0xA0),
-            "shift_r": (keyboard.Key.shift_r, 0xA1),
-            "caps_lock": (keyboard.Key.caps_lock, 0x14),
+            "alt_l": keyboard.Key.alt_l,
+            "alt_r": keyboard.Key.alt_r,
+            "ctrl_l": keyboard.Key.ctrl_l,
+            "ctrl_r": keyboard.Key.ctrl_r,
+            "shift_l": keyboard.Key.shift_l,
+            "shift_r": keyboard.Key.shift_r,
+            "menu": keyboard.Key.menu,
         }
-        key_info = key_map.get(hotkey_str, (None, None))
-        self._hold_key = key_info[0]
-        self._hold_vk = key_info[1]
-        self._hold_key_pressed = False
-        self._is_caps_lock = hotkey_str == "caps_lock"
+
+        names = [self.config.get("hotkey", "caps_lock")]
+        names += self.config.get("extra_hotkeys") or []
+
+        self._hold_keys = set()
+        self._hold_caps = False
+        self._hold_numpad_enter = False
+        self._pressed_hold_keys = set()
+        for name in names:
+            if name == "numpad_enter":
+                self._hold_numpad_enter = True
+            elif name == "caps_lock":
+                self._hold_caps = True
+                self._hold_keys.add(keyboard.Key.caps_lock)
+            elif name in key_map:
+                self._hold_keys.add(key_map[name])
 
         def on_press(key: Any) -> None:  # noqa: ANN401
-            # Ignore the echo of our own synthetic CapsLock-off keystroke.
-            if time.monotonic() < self._caps_synth_until:
-                return
-            if key == self._hold_key and not self._hold_key_pressed:
-                self._hold_key_pressed = True
-                self._on_hold_start()
+            if key in self._hold_keys:
+                self._press_hold_key(key)
 
         def on_release(key: Any) -> None:  # noqa: ANN401
-            # Ignore the echo of our own synthetic CapsLock-off keystroke.
-            if time.monotonic() < self._caps_synth_until:
-                return
-            if key == self._hold_key and self._hold_key_pressed:
-                self._hold_key_pressed = False
-                self._on_hold_release()
+            if key in self._hold_keys:
+                self._release_hold_key(key)
 
-        if self._is_caps_lock:
-            # Force CapsLock OFF at startup, then keep it OFF as a hard rule.
-            self._ensure_caps_lock_off()
-            self._start_caps_watchdog()
+        if self._hold_caps or self._hold_numpad_enter:
+            if self._hold_caps:
+                # One-time: clear CapsLock now, before the hook starts
+                # suppressing it — otherwise a lock that was already ON would
+                # be stuck ON for the whole session.
+                self._ensure_caps_lock_off()
 
-            # Suppress CapsLock so it doesn't toggle caps or show OSD
+            wm_keydown, wm_syskeydown = 0x0100, 0x0104
+            wm_keyup, wm_syskeyup = 0x0101, 0x0105
+            vk_return, vk_capital = 0x0D, 0x14
+            llkhf_extended, llkhf_injected = 0x01, 0x10
+
             def win32_event_filter(msg: int, data: Any) -> bool:  # noqa: ANN401
-                if hasattr(data, "vkCode") and data.vkCode == 0x14:  # VK_CAPITAL
-                    # Suppress CapsLock so the hold key never flips the OS
-                    # lock state, except during the brief pass-through window
-                    # opened by _ensure_caps_lock_off (our own off-keystroke).
-                    self._hold_listener._suppress = (  # noqa: SLF001
-                        time.monotonic() >= self._caps_passthrough_until
-                    )
-                else:
-                    self._hold_listener._suppress = False  # noqa: SLF001
+                vk = getattr(data, "vkCode", None)
+                # Numpad Enter = VK_RETURN with the extended-key flag. The
+                # callback only ever sees a generic Key.enter and couldn't tell
+                # it from the main Enter, so drive recording here and swallow it.
+                if (
+                    self._hold_numpad_enter
+                    and vk == vk_return
+                    and (data.flags & llkhf_extended)
+                ):
+                    self._hold_listener._suppress = True  # noqa: SLF001
+                    if msg in (wm_keydown, wm_syskeydown):
+                        self._press_hold_key("numpad_enter")
+                    elif msg in (wm_keyup, wm_syskeyup):
+                        self._release_hold_key("numpad_enter")
+                    return False  # don't deliver to on_press/on_release
+                # CapsLock: swallow system-wide so it can't flip the OS lock,
+                # but still deliver physical presses to the callbacks so it
+                # drives recording. Ignore synthetic (injected) caps events.
+                if self._hold_caps and vk == vk_capital:
+                    self._hold_listener._suppress = True  # noqa: SLF001
+                    if data.flags & llkhf_injected:
+                        return False
+                    return True
+                self._hold_listener._suppress = False  # noqa: SLF001
                 return True
 
             self._hold_listener = keyboard.Listener(
@@ -530,6 +571,23 @@ class WhisperAppController:
             )
         self._hold_listener.start()
 
+    def _press_hold_key(self, ident: Any) -> None:  # noqa: ANN401
+        """Register a PTT key going down; start recording on the first one."""
+        if ident in self._pressed_hold_keys:
+            return
+        was_idle = not self._pressed_hold_keys
+        self._pressed_hold_keys.add(ident)
+        if was_idle:
+            self._on_hold_start()
+
+    def _release_hold_key(self, ident: Any) -> None:  # noqa: ANN401
+        """Register a PTT key going up; stop recording when the last one lifts."""
+        if ident not in self._pressed_hold_keys:
+            return
+        self._pressed_hold_keys.discard(ident)
+        if not self._pressed_hold_keys:
+            self._on_hold_release()
+
     def _cancel_recording(self) -> None:
         """Cancel an in-progress recording without transcribing."""
         if self.recorder and self.recorder.recording:
@@ -541,89 +599,64 @@ class WhisperAppController:
             self.set_status("Ready")
 
     def _ensure_caps_lock_off(self) -> None:
-        """Force CapsLock to OFF state if it's currently ON."""
+        """Toggle CapsLock OFF once if it happens to be ON.
+
+        Called once before the hold-listener starts (while CapsLock isn't yet
+        suppressed by the hook), so the injected keystroke actually reaches the
+        OS and flips the lock. While the app runs the hook suppresses every
+        physical CapsLock event, so the lock can no longer be toggled on — no
+        watchdog needed.
+        """
         user32 = ctypes.windll.user32
         VK_CAPITAL = 0x14
         KEYEVENTF_KEYUP = 0x0002
         # GetKeyState bit 0 = toggled ON
         if user32.GetKeyState(VK_CAPITAL) & 1:
-            # Briefly let CapsLock through the suppress filter so our OWN
-            # injected keystroke actually reaches the OS and flips the lock
-            # OFF. Without this the win32_event_filter eats it and CapsLock
-            # stays stuck ON.
-            self._caps_passthrough_until = time.monotonic() + 0.15
-            self._caps_synth_until = time.monotonic() + 0.15
-            # Simulate press+release to toggle it OFF
             user32.keybd_event(VK_CAPITAL, 0x3A, 0, 0)
             user32.keybd_event(VK_CAPITAL, 0x3A, KEYEVENTF_KEYUP, 0)
 
-    def _start_caps_watchdog(self) -> None:
-        """Enforce 'CapsLock always OFF' while the app runs.
-
-        CapsLock (the hold key) is suppressed so it can't toggle the lock;
-        this watchdog flips it back off if anything else turns it on. Daemon
-        thread (dies with the process); keybd_event must not run inside a
-        pynput callback, so a dedicated thread is required.
-        """
-
-        def _loop() -> None:
-            while not self._caps_watchdog_stop.wait(0.2):
-                try:
-                    if ctypes.windll.user32.GetKeyState(0x14) & 1:  # VK_CAPITAL ON
-                        self._ensure_caps_lock_off()
-                except Exception:  # noqa: BLE001
-                    pass
-
-        threading.Thread(target=_loop, daemon=True).start()
-
-    def _defer_caps_lock_off(self) -> None:
-        """Defer CapsLock reset to a separate thread to avoid pynput deadlock.
-
-        keybd_event inside a pynput callback deadlocks the Windows message pump.
-        """
-        if self._is_caps_lock:
-            threading.Thread(target=self._ensure_caps_lock_off, daemon=True).start()
-
     def _on_hold_start(self) -> None:
-        """Handle hold key press — start recording."""
-        self._defer_caps_lock_off()
+        """Handle hold key press — start recording.
+
+        Deliberately does NOT gate on ``is_processing``: recording is
+        independent of transcription, and the transcriber's own lock
+        serializes GPU work. Blocking here silently swallowed speech when
+        the user pressed PTT while the previous take was still processing.
+        """
         if self.paused:
             return
-        if self.is_processing:
-            # Auto-reset if processing has been stuck for over 60 seconds
-            if time.time() - self._processing_start_time > 60:
-                self.log("Processing timeout — resetting stuck state.")
-                self.is_processing = False
-            else:
-                return
         if not self.recorder:
             self.log("Recorder not initialized.")
             return
-        if self.recorder.recording:
-            return
 
         def do_start() -> None:
-            self._we_paused_media = False
-            if self.config.get("pause_media", True) and self._media:
-                self._we_paused_media = self._media.pause_if_playing()
-            self._start_recording()
+            with self._ptt_lock:
+                if not self.recorder or self.recorder.recording:
+                    return
+                self._we_paused_media = False
+                if self.config.get("pause_media", True) and self._media:
+                    self._we_paused_media = self._media.pause_if_playing()
+                self._start_recording()
+            # Key already released while we were starting (quick tap during
+            # the media-pause window) — stop now, or recording runs forever.
+            if not self._pressed_hold_keys:
+                self._do_ptt_stop()
 
         threading.Thread(target=do_start, daemon=True).start()
 
     def _on_hold_release(self) -> None:
         """Handle hold key release — stop recording, transcribe, auto-type."""
-        self._defer_caps_lock_off()
+        threading.Thread(target=self._do_ptt_stop, daemon=True).start()
 
-        if not self.recorder or not self.recorder.recording:
-            return
-
-        def do_release() -> None:
+    def _do_ptt_stop(self) -> None:
+        """Stop the PTT recording (serialized against starts via _ptt_lock)."""
+        with self._ptt_lock:
+            if not self.recorder or not self.recorder.recording:
+                return
             if self._we_paused_media and self._media:
                 self._media.resume()
                 self._we_paused_media = False
             self._stop_recording_and_type()
-
-        threading.Thread(target=do_release, daemon=True).start()
 
     def stop(self) -> None:
         """Stop the application: listeners, recording, live transcription, overlay."""
@@ -733,20 +766,31 @@ class WhisperAppController:
             self._processing_start_time = time.time()
 
             def process_audio() -> None:
+                # Backup the raw audio first — if transcription fails, the
+                # speech is still recoverable from _audio_backup/.
+                backup = save_audio_backup(audio_data)
+                backup_path = str(backup) if backup else None
+                if backup:
+                    self.log(f"Audio backup saved: {backup.name}")
                 try:
                     if self.transcriber:
                         text = self.transcriber.transcribe(audio_data)
                         if text:
                             self.pending_text = text
-                            self._add_to_history(text)
+                            self._add_to_history(text, audio_path=backup_path)
                             self.log(f"Transcribed: {text}")
                             if self.on_preview_update:
                                 self.on_preview_update(text, None)
                             self.set_status("Text Ready")
                         else:
+                            self._add_to_history("", status="empty", audio_path=backup_path)
                             self.log("No text transcribed.")
                             self.set_status("Ready")
                 except Exception as e:  # noqa: BLE001
+                    self._add_to_history(
+                        self.pending_text or "", status="error",
+                        audio_path=backup_path, error=str(e),
+                    )
                     self.log(f"Error: {e}")
                     self.set_status("Error")
                 finally:
@@ -782,6 +826,12 @@ class WhisperAppController:
             self._processing_start_time = time.time()
 
             def process_and_type() -> None:
+                # Backup the raw audio first — if transcription fails, the
+                # speech is still recoverable from _audio_backup/.
+                backup = save_audio_backup(audio_data)
+                backup_path = str(backup) if backup else None
+                if backup:
+                    self.log(f"Audio backup saved: {backup.name}")
                 try:
                     if self.transcriber:
                         text = self.transcriber.transcribe(audio_data)
@@ -809,7 +859,7 @@ class WhisperAppController:
                                         if self.on_preview_update:
                                             self.on_preview_update(text, original)
 
-                            self._add_to_history(text)
+                            self._add_to_history(text, audio_path=backup_path)
 
                             # Auto-type if enabled
                             if self.config.get("auto_type", False):
@@ -818,14 +868,22 @@ class WhisperAppController:
                             else:
                                 self.set_status("Text Ready")
                         else:
+                            self._add_to_history("", status="empty", audio_path=backup_path)
                             self.log("No text transcribed.")
                             self.set_status("Ready")
                 except Exception as e:  # noqa: BLE001
+                    self._add_to_history(
+                        self.pending_text or "", status="error",
+                        audio_path=backup_path, error=str(e),
+                    )
                     self.log(f"Error: {e}")
                     self.set_status("Error")
                 finally:
                     self.is_processing = False
-                    self.overlay.hide()
+                    # Don't yank the visualizer away from a NEW recording the
+                    # user may have already started while we were transcribing.
+                    if not (self.recorder and self.recorder.recording):
+                        self.overlay.hide()
 
             threading.Thread(target=process_and_type, daemon=True).start()
         else:

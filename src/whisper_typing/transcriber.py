@@ -35,6 +35,18 @@ _HALLUCINATION_PATTERNS: set[str] = {
     "thank you for listening",
     "subtitles by",
     "amara.org",
+    # Russian hallucinations on silence/noise
+    "продолжение следует",
+    "субтитры подготовил",
+    "субтитры подготовлены",
+    "субтитры сделал",
+    "субтитры создавал",
+    "субтитры создал",
+    "редактор субтитров",
+    "корректор",
+    "спасибо за просмотр",
+    "спасибо за внимание",
+    "всем спасибо",
 }
 
 # Regex: entire text is just repetitions of a short word/phrase separated by spaces/punctuation
@@ -128,8 +140,14 @@ class Transcriber:
         return False
 
     @staticmethod
-    def _audio_is_silent(audio: np.ndarray, threshold: float = 0.01) -> bool:
-        """Check if audio energy is below silence threshold."""
+    def _audio_is_silent(audio: np.ndarray, threshold: float = 0.002) -> bool:
+        """Check if audio energy is below silence threshold.
+
+        Lowered from 0.01 (≈−40 dBFS) to 0.002 (≈−54 dBFS) so far-mic /
+        quiet speech is not dropped before Whisper sees it. True silence
+        from a typical mic floors around 0.0001–0.0005, so this still
+        rejects empty buffers.
+        """
         import numpy as np
 
         rms = float(np.sqrt(np.mean(audio.astype(np.float32) ** 2)))
@@ -158,7 +176,9 @@ class Transcriber:
                 language=self.language,
                 condition_on_previous_text=False,
                 vad_filter=True,
-                vad_parameters={"min_silence_duration_ms": 500},
+                # 1000ms (vs live preview's 500ms) — VAD is less likely to
+                # trim entire utterance when speech is quiet/far from mic.
+                vad_parameters={"min_silence_duration_ms": 1000},
             )
             text = " ".join([segment.text for segment in segments]).strip()
 

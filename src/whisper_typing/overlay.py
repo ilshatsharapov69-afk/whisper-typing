@@ -236,10 +236,9 @@ class AudioOverlay:
         """Sample audio data into bar heights."""
         if not self._recorder:
             return
-        audio = self._recorder.get_current_data()
+        audio = self._recorder.get_recent_data(max_samples=4800)
         if audio is not None and len(audio) > 0:
-            chunk_size = min(len(audio), 4800)
-            chunk = audio[-chunk_size:]
+            chunk = audio
             segments = np.array_split(chunk, BAR_COUNT)
             for i, seg in enumerate(segments):
                 rms = float(np.sqrt(np.mean(seg**2)))

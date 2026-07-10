@@ -33,6 +33,9 @@ class AudioRecorder:
         self.thread: threading.Thread | None = None
         self._lock: Final[threading.Lock] = threading.Lock()
         self._stop_event = threading.Event()
+        # Last exception raised inside _record() — exposes silent failures
+        # (USB hiccup, driver error, exclusive-mode conflict) to callers.
+        self.last_error: str | None = None
 
     @staticmethod
     def list_devices() -> list[tuple[int, str]]:
@@ -49,8 +52,9 @@ class AudioRecorder:
                 input_devices.append((i, dev["name"]))
         return input_devices
 
-    # Max samples to keep in buffer (5 minutes at 16kHz = 4,800,000 samples)
-    _MAX_SAMPLES: int = 16000 * 300
+    # Max samples to keep in buffer (30 minutes at 16kHz ≈ 115MB float32).
+    # Anything longer silently loses its beginning — keep this generous.
+    _MAX_SAMPLES: int = 16000 * 1800
     _total_samples: int = 0
 
     def _callback(
@@ -91,8 +95,16 @@ class AudioRecorder:
             ):
                 # Wait on event instead of polling — wakes up instantly on stop()
                 self._stop_event.wait()
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as e:  # noqa: BLE001
+            # Record so the caller can see WHY recording stopped silently.
+            self.last_error = f"{type(e).__name__}: {e}"
+            try:
+                import logging
+                logging.getLogger("whisper_typing").exception(
+                    "AudioRecorder._record crashed"
+                )
+            except Exception:  # noqa: BLE001, S110
+                pass
         finally:
             self.recording = False
 
@@ -110,6 +122,7 @@ class AudioRecorder:
 
         self._stop_event.clear()
         self.recording = True
+        self.last_error = None
         with self._lock:
             self.frames = []  # Clear frames
             self._total_samples = 0

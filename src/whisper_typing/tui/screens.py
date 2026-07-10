@@ -338,6 +338,12 @@ class HistoryScreen(ModalScreen[None]):
 
     BINDINGS: ClassVar[list[Binding]] = [
         Binding("escape", "close", "Close"),
+        Binding("c", "copy_last", "Copy last"),
+        Binding("1", "copy_n(1)", "Copy #1"),
+        Binding("2", "copy_n(2)", "Copy #2"),
+        Binding("3", "copy_n(3)", "Copy #3"),
+        Binding("4", "copy_n(4)", "Copy #4"),
+        Binding("5", "copy_n(5)", "Copy #5"),
     ]
 
     def __init__(self, history: list[tuple[str, str]]) -> None:
@@ -355,10 +361,15 @@ class HistoryScreen(ModalScreen[None]):
         from textual.widgets import RichLog
 
         yield Container(
-            Label("Transcription History (last 10)", id="history_title"),
+            Label(
+                "Transcription History — press 1-5 to copy that entry, "
+                "C = copy last, Esc = close",
+                id="history_title",
+            ),
             RichLog(id="history_list", markup=True, highlight=True),
             Horizontal(
-                Button("Copy All", variant="primary", id="history_copy_all_btn"),
+                Button("Copy Last", variant="primary", id="history_copy_last_btn"),
+                Button("Copy All", variant="default", id="history_copy_all_btn"),
                 Button("Close", variant="error", id="history_close_btn"),
                 id="history_buttons",
             ),
@@ -375,20 +386,57 @@ class HistoryScreen(ModalScreen[None]):
             return
 
         for i, (timestamp, text) in enumerate(self.history, 1):
-            log_widget.write(f"[bold blue][{timestamp}][/bold blue] [bold]#{i}[/bold]")
-            log_widget.write(f"  {text}")
+            # Color failed/empty entries differently so they stand out
+            is_error = text.startswith("[FAILED")
+            is_empty = text.startswith("[NO SPEECH")
+            if is_error:
+                header_color = "bold red"
+            elif is_empty:
+                header_color = "bold yellow"
+            else:
+                header_color = "bold blue"
+            log_widget.write(
+                f"[{header_color}][{timestamp}][/{header_color}] [bold]#{i}[/bold]"
+            )
+            # text may contain a wav path on its own line — render verbatim
+            for line in text.splitlines() or [""]:
+                log_widget.write(f"  {line}")
             log_widget.write("")
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         """Handle button press events."""
         if event.button.id == "history_copy_all_btn":
             self._copy_all()
+        elif event.button.id == "history_copy_last_btn":
+            self.action_copy_last()
         elif event.button.id == "history_close_btn":
             self.dismiss(None)
 
     def action_close(self) -> None:
         """Close the history screen."""
         self.dismiss(None)
+
+    def action_copy_last(self) -> None:
+        """Copy the newest entry's text (first item)."""
+        self.action_copy_n(1)
+
+    def action_copy_n(self, n: int) -> None:
+        """Copy entry #n (1-based, newest first)."""
+        import pyperclip
+
+        if not self.history or n < 1 or n > len(self.history):
+            self.app.notify(f"No entry #{n}", severity="warning")
+            return
+        _, text = self.history[n - 1]
+        # Strip [FAILED ...] / [NO SPEECH ...] marker prefix when copying so the
+        # user gets clean text or a usable wav path, not the diagnostic label.
+        clean = text
+        if text.startswith("[FAILED") or text.startswith("[NO SPEECH"):
+            # Keep marker line so user sees what was copied; they can edit.
+            pass
+        pyperclip.copy(clean)
+        preview = clean[:60].replace("\n", " ")
+        self.app.notify(f"Copied #{n}: {preview}")
 
     def _copy_all(self) -> None:
         """Copy all history entries to clipboard."""

@@ -1,0 +1,21 @@
+{
+  "id": "whisper-typing",
+  "status": "done",
+  "progress": 95,
+  "priority": 14,
+  "description": "Speech-to-text + auto-typing via Whisper. System tray, overlay, EXE build.",
+  "tags": ["tool", "whisper", "voice"],
+  "nextAction": "Feature-complete. Maintenance.",
+  "blockers": "",
+  "milestones": [
+    { "text": "Core: speech-to-text + typing", "done": true },
+    { "text": "System tray + audio overlay", "done": true },
+    { "text": "Hold-to-record mode", "done": true },
+    { "text": "EXE build (build_dist.ps1)", "done": true }
+  ],
+  "log": [
+    { "date": "2026-03-02", "text": "Feature-complete: tray, overlay, hold-to-record, EXE" },
+    { "date": "2026-07-10", "text": "PTT = только numpad Enter (CapsLock возвращён системе); история снова персистентна (history.json + WAV-бэкапы); фиксы гонок PTT; буфер 5→30 мин" }
+  ],
+  "lastUpdated": "2026-07-10T12:00:00"
+}

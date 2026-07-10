@@ -8,3 +8,9 @@ dist
 config.json
 build/
 models/
+
+# runtime artifacts (личные данные: логи, голос, транскрипты)
+_app.*
+_startup.*
+_audio_backup/
+history.json
