@@ -14,3 +14,5 @@ _app.*
 _startup.*
 _audio_backup/
 history.json
+history.json.tmp
+history.json.corrupt
