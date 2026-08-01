@@ -83,3 +83,25 @@ def test_history_retention_keeps_newest_entries(
         history.add(text)
 
     assert [entry[1] for entry in history.recent(10)] == ["four", "three", "two"]
+
+
+def test_full_history_recovers_only_newer_log_entries(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Test that startup skips discarded old logs but recovers a newer gap."""
+    monkeypatch.setattr(diagnostics, "HISTORY_KEEP", 3)
+    history = PersistentHistory()
+    for text in ("one", "two", "three"):
+        history.add(text)
+    (tmp_path / "_app.log").write_text(
+        "2020-01-01 00:00:00 [INFO] Transcribed: too old\n"
+        "2099-01-01 00:00:00 [INFO] Transcribed: genuinely newer\n",
+        encoding="utf-8",
+    )
+
+    reloaded = PersistentHistory()
+    texts = [entry["text"] for entry in reloaded.entries()]
+
+    assert "genuinely newer" in texts
+    assert "too old" not in texts

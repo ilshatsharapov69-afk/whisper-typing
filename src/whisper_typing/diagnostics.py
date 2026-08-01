@@ -173,6 +173,14 @@ class PersistentHistory:
 
     def _merge_legacy_log_entries(self) -> bool:
         """Recover successful transcriptions from rotating legacy logs."""
+        oldest_kept = ""
+        if len(self._entries) >= HISTORY_KEEP:
+            timestamps = [
+                entry.get("timestamp", "")
+                for entry in self._entries
+                if entry.get("timestamp")
+            ]
+            oldest_kept = min(timestamps, default="")
         existing = {
             (entry.get("timestamp", ""), entry.get("text", ""))
             for entry in self._entries
@@ -190,6 +198,8 @@ class PersistentHistory:
                             continue
                         key = (match.group(1), match.group(2))
                         if _is_test_artifact(key[1]):
+                            continue
+                        if oldest_kept and key[0] < oldest_kept:
                             continue
                         if key in existing:
                             continue
