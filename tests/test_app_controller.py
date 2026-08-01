@@ -121,6 +121,7 @@ def test_on_record_toggle_stop(mock_dependencies: dict[str, Any]) -> None:  # no
     mock_recorder = controller.recorder
     # Set to recording state
     mock_recorder.recording = True
+    mock_recorder.stop.return_value = None
     controller.stop_live_transcribe = threading.Event()
 
     # Trigger toggle (Stop)

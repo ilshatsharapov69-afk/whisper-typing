@@ -39,6 +39,13 @@ _LEGACY_TRANSCRIPTION_RE = re.compile(
 )
 
 
+def _is_test_artifact(text: object) -> bool:
+    """Return whether a value is a leaked unittest mock representation."""
+    return not isinstance(text, str) or text.lstrip().startswith(
+        ("<MagicMock", "<AsyncMock", "<Mock")
+    )
+
+
 _logger: logging.Logger | None = None
 
 
@@ -132,12 +139,20 @@ class PersistentHistory:
         self._load()
 
     def _load(self) -> None:
+        cleaned = False
         try:
             if HISTORY_PATH.exists():
                 with HISTORY_PATH.open("r", encoding="utf-8") as f:
                     data = json.load(f)
                 if isinstance(data, list):
-                    self._entries = data[-HISTORY_KEEP:]
+                    valid = [
+                        entry
+                        for entry in data
+                        if isinstance(entry, dict)
+                        and not _is_test_artifact(entry.get("text", ""))
+                    ]
+                    cleaned = len(valid) != len(data)
+                    self._entries = valid[-HISTORY_KEEP:]
         except Exception as e:  # noqa: BLE001
             get_logger().warning("history load failed: %s", e)
             self._entries = []
@@ -152,7 +167,8 @@ class PersistentHistory:
         # while the rotating log retained many successful transcriptions.
         # Import those once (deduplicated) so the new History view can recover
         # text the user thought was gone.
-        if self._merge_legacy_log_entries():
+        recovered = self._merge_legacy_log_entries()
+        if cleaned or recovered:
             self._save()
 
     def _merge_legacy_log_entries(self) -> bool:
@@ -173,6 +189,8 @@ class PersistentHistory:
                         if not match:
                             continue
                         key = (match.group(1), match.group(2))
+                        if _is_test_artifact(key[1]):
+                            continue
                         if key in existing:
                             continue
                         existing.add(key)

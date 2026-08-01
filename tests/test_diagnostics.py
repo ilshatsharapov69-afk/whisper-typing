@@ -42,6 +42,18 @@ def test_history_log_recovery_is_deduplicated(tmp_path: Path) -> None:
     assert len(reloaded.entries()) == 1
 
 
+def test_history_rejects_leaked_mock_artifacts(tmp_path: Path) -> None:
+    """Test that asynchronous unit-test mocks never enter user history."""
+    (tmp_path / "_app.log").write_text(
+        "2026-07-31 10:00:05 [INFO] Transcribed: <MagicMock name='text'>\n",
+        encoding="utf-8",
+    )
+
+    history = PersistentHistory()
+
+    assert history.entries() == []
+
+
 def test_history_exports_searchable_escaped_html(tmp_path: Path) -> None:
     """Test local report content, escaping, copy controls, and audio link."""
     audio = tmp_path / "recording.wav"
