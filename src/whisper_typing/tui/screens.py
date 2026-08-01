@@ -187,10 +187,6 @@ class ConfigurationScreen(Screen[bool]):
             ),
             Label("Record Hotkey:"),
             Input(value=config.get("hotkey"), id="hotkey_input"),
-            Label("Type Hotkey:"),
-            Input(value=config.get("type_hotkey"), id="type_hotkey_input"),
-            Label("Typing Speed (WPM):"),
-            Input(value=str(config.get("typing_wpm", 40)), id="typing_wpm_input"),
             Label("Refocus Window:"),
             Checkbox(value=config.get("refocus_window", True), id="refocus_checkbox"),
             Label("Debug Mode:"),
@@ -224,18 +220,11 @@ class ConfigurationScreen(Screen[bool]):
         model_select = self.query_one("#model_select", Select)
         device_select = self.query_one("#device_select", Select)
         hotkey_input = self.query_one("#hotkey_input", Input)
-        type_input = self.query_one("#type_hotkey_input", Input)
         gemini_model_select = self.query_one("#gemini_model_select", Select)
         debug_checkbox = self.query_one("#debug_checkbox", Checkbox)
         refocus_checkbox = self.query_one("#refocus_checkbox", Checkbox)
-        typing_wpm_input = self.query_one("#typing_wpm_input", Input)
         compute_type_select = self.query_one("#compute_type_select", Select)
         model_cache_input = self.query_one("#model_cache_input", Input)
-
-        try:
-            typing_wpm = int(typing_wpm_input.value)
-        except ValueError:
-            typing_wpm = 40
 
         new_config = {
             "microphone_name": None,
@@ -246,8 +235,6 @@ class ConfigurationScreen(Screen[bool]):
             "debug": debug_checkbox.value,
             "refocus_window": refocus_checkbox.value,
             "hotkey": hotkey_input.value,
-            "type_hotkey": type_input.value,
-            "typing_wpm": typing_wpm,
             "model_cache_dir": model_cache_input.value or None,
         }
 

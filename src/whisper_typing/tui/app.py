@@ -165,10 +165,9 @@ class WhisperTui(App[None]):
         has_api_key = bool(cfg.get("gemini_api_key"))
 
         record_key = cfg.get("hotkey", "?")
-        type_key = cfg.get("type_hotkey", "?")
         improve_key = cfg.get("improve_hotkey", "?")
 
-        text = f"Global Keys: {record_key} = Start/Stop | {type_key} = Type | "
+        text = f"Global Keys: {record_key} = Start/Stop | "
 
         if has_api_key:
             text += f"{improve_key} = Improve"

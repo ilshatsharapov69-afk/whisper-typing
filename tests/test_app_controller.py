@@ -22,7 +22,6 @@ def mock_dependencies() -> Generator[dict[str, Any]]:
     with (
         patch("whisper_typing.app_controller.AudioRecorder") as mock_recorder,
         patch("whisper_typing.app_controller.Transcriber") as mock_transcriber,
-        patch("whisper_typing.app_controller.Typer") as mock_typer,
         patch("whisper_typing.app_controller.AIImprover") as mock_improver,
         patch("whisper_typing.app_controller.WindowManager") as mock_window_manager,
         patch("whisper_typing.app_controller.AudioOverlay") as mock_overlay,
@@ -33,7 +32,6 @@ def mock_dependencies() -> Generator[dict[str, Any]]:
         yield {
             "recorder": mock_recorder,
             "transcriber": mock_transcriber,
-            "typer": mock_typer,
             "improver": mock_improver,
             "window_manager": mock_window_manager,
             "overlay": mock_overlay,
@@ -65,7 +63,6 @@ def test_initialize_components(mock_dependencies: dict[str, Any]) -> None:  # no
     assert success is True
     assert controller.recorder is not None
     assert controller.transcriber is not None
-    assert controller.typer is not None
     assert controller.improver is not None
     assert controller.window_manager is not None
 
@@ -86,7 +83,24 @@ def test_start_listener(mock_dependencies: dict[str, Any]) -> None:
     args, _ = expected_hotkeys.call_args
     hotkey_map = args[0]
     assert controller.config["hotkey"] in hotkey_map
-    assert controller.config["type_hotkey"] in hotkey_map
+    assert "<f9>" not in hotkey_map
+
+
+def test_legacy_f9_config_cannot_restore_manual_typing_hotkey(
+    mock_dependencies: dict[str, Any],
+) -> None:
+    """Test that a stale type_hotkey value is deliberately ignored."""
+    controller = WhisperAppController()
+    controller.config = DEFAULT_CONFIG | {
+        "gemini_api_key": "fake",
+        "type_hotkey": "<f9>",
+    }
+    controller.initialize_components()
+
+    controller.start_listener()
+
+    args, _ = mock_dependencies["hotkeys"].call_args
+    assert "<f9>" not in args[0]
 
 
 def test_numpad_enter_is_consumed_by_the_windows_hook() -> None:
@@ -169,24 +183,6 @@ def test_on_record_toggle_stop(mock_dependencies: dict[str, Any]) -> None:  # no
 
     mock_recorder.stop.assert_called_once()
     assert controller.stop_live_transcribe.is_set()
-
-
-def test_on_type_confirm(mock_dependencies: dict[str, Any]) -> None:  # noqa: ARG001
-    """Test typing confirmation."""
-    controller = WhisperAppController()
-    controller.config = DEFAULT_CONFIG.copy()
-    controller.config["gemini_api_key"] = "fake"
-    controller.initialize_components()
-
-    controller.pending_text = "Hello World"
-
-    # Mock threading to run synchronously for test or just assert it was started
-    # Here we simulate the logic inside the thread or check if thread started
-    with patch("threading.Thread") as mock_thread:
-        controller.on_type_confirm()
-        mock_thread.assert_called_once()
-        # You could introspect the target of the thread if needed,
-        # but verifying the thread creation is usually sufficient for this level.
 
 
 def test_on_improve_text(mock_dependencies: dict[str, Any]) -> None:  # noqa: ARG001

@@ -1,7 +1,6 @@
 {
     "hotkey": "numpad_enter",
     "extra_hotkeys": [],
-    "type_hotkey": "<f9>",
     "improve_hotkey": "<f10>",
     "model": "openai/whisper-large-v3-turbo",
     "language": null,
@@ -11,7 +10,6 @@
     "device": "cuda",
     "compute_type": "int8_float16",
     "debug": true,
-    "typing_wpm": 350,
     "refocus_window": true,
     "model_cache_dir": "./models/",
     "pause_media": true,

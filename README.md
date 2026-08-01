@@ -2,26 +2,24 @@
 
 ![whisper](https://github.com/user-attachments/assets/8bbd34ac-38d2-481e-9356-06e9f4498f0e)
 
-A powerful, human-like background speech-to-text application for Windows that runs locally. It listens for a global hotkey to record your voice, transcribes it in real-time using `faster-whisper`, and types the result into your active window with natural rhythm and pace.
+A background speech-to-text application for Windows that runs locally. It listens for a global hotkey to record your voice, transcribes it using `faster-whisper`, and safely pastes the result into your target window.
 
 > Fork of [rpfilomeno/whisper-typing](https://github.com/rpfilomeno/whisper-typing) with system tray support, audio overlay, media pause, and hold-to-record mode.
 
 ## Features
 
 - **Real-Time Transcription**: See your words appear in the preview area instantly as you speak.
-- **Human-like Typing**: Simulates natural typing with variable speed, random jitter, and intelligent pauses after punctuation.
 - **System Tray Icon**: Runs in the background with a color-coded tray icon (green = ready, red = recording, yellow = processing).
 - **Audio Overlay**: Floating audio level visualization while recording.
 - **Media Auto-Pause**: Pauses every Windows media session plus Chrome/Edge Picture-in-Picture when recording starts, then resumes only what the app paused.
 - **Recovery History**: Right-click the tray icon and choose **History** for a searchable local report with copy buttons and playable WAV backups.
 - **Hold-to-Record**: Hold the hotkey to record, release to stop (configurable: hold or toggle mode).
-- **Auto-Type**: Automatically types the transcribed text after recording stops.
-- **Global Hotkeys**: Control recording and typing from any application.
+- **Auto-Paste**: Automatically pastes the transcribed text after recording stops.
+- **Global Hotkeys**: Control recording and optional AI improvement from any application.
   - **Record/Stop**: `Caps Lock` or `F8` (configurable)
-  - **Confirm Type**: `F9` (default)
   - **Improve Text**: `F10` (default) - Uses Gemini AI to fix grammar and refine text.
 - **Window Refocus**: Automatically switches back to your target window after recording stops.
-- **Safe Focus**: Automatically stops typing if you switch away from the target window.
+- **Safe Focus**: Keeps the text in the clipboard instead of pasting if focus changed.
 - **TUI Management**: A sleek terminal interface for monitoring logs, previewing text, and configuring settings.
 - **Microphone Selection**: Choose your preferred input device directly from the configuration screen.
 - **Local Processing**: Audio is processed locally using `faster-whisper` (accelerated with CUDA if available).
@@ -68,13 +66,11 @@ On first run, a `config.json` is created with defaults. You can edit it or press
 ```json
 {
   "hotkey": "caps_lock",
-  "type_hotkey": "<f9>",
   "improve_hotkey": "<f10>",
   "model": "openai/whisper-large-v3-turbo",
   "language": null,
   "device": "cuda",
   "compute_type": "float16",
-  "typing_wpm": 350,
   "refocus_window": true,
   "record_mode": "hold",
   "auto_type": true,

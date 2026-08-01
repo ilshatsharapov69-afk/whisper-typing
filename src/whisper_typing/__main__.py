@@ -45,7 +45,6 @@ def main() -> None:
         description="Whisper Typing - Background Speech to Text"
     )
     parser.add_argument("--hotkey", help="Global hotkey to toggle recording")
-    parser.add_argument("--type-hotkey", help="Global hotkey to type")
     parser.add_argument("--improve-hotkey", help="Global hotkey to improve text")
     parser.add_argument("--model", help="Whisper model ID")
     parser.add_argument("--language", help="Language code")

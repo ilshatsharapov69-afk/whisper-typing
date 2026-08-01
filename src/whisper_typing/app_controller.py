@@ -18,7 +18,6 @@ from whisper_typing.audio_capture import AudioRecorder
 from whisper_typing.diagnostics import PersistentHistory, get_logger, save_audio_backup
 from whisper_typing.overlay import AudioOverlay
 from whisper_typing.transcriber import Transcriber
-from whisper_typing.typer import Typer
 from whisper_typing.window_manager import WindowManager
 
 if TYPE_CHECKING:
@@ -27,7 +26,6 @@ if TYPE_CHECKING:
 DEFAULT_CONFIG: dict[str, Any] = {
     "hotkey": "<f8>",
     "extra_hotkeys": [],
-    "type_hotkey": "<f9>",
     "improve_hotkey": "<f10>",
     "model": "openai/whisper-base",
     "language": None,
@@ -37,7 +35,6 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "device": "cpu",
     "compute_type": "auto",
     "debug": False,
-    "typing_wpm": 40,
     "gemini_api_key": None,
     "refocus_window": True,
     "model_cache_dir": None,
@@ -253,7 +250,6 @@ class WhisperAppController:
         self.config: dict[str, Any] = {}
         self.recorder: AudioRecorder | None = None
         self.transcriber: Transcriber | None = None
-        self.typer: Typer | None = None
         self.improver: AIImprover | None = None
         self.listener: keyboard.GlobalHotKeys | None = None
         self.window_manager: WindowManager = WindowManager()
@@ -288,9 +284,6 @@ class WhisperAppController:
         self.on_status_change: Callable[[str], None] | None = None
         self.on_log: Callable[[str], None] | None = None
         self.on_preview_update: Callable[[str, str | None], None] | None = None
-
-        self.typing_stop_event: threading.Event = threading.Event()
-        self._is_typing: bool = False
 
         # Hold-to-talk state. Recording runs while any registered push-to-talk
         # key is held (multi-key: e.g. CapsLock on the left + numpad Enter on
@@ -403,8 +396,6 @@ class WhisperAppController:
         if args:
             if args.hotkey:
                 self.config["hotkey"] = args.hotkey
-            if args.type_hotkey:
-                self.config["type_hotkey"] = args.type_hotkey
             if args.improve_hotkey:
                 self.config["improve_hotkey"] = args.improve_hotkey
             if args.model:
@@ -538,7 +529,6 @@ class WhisperAppController:
             if self.recorder and self.recorder.recording:
                 self.recorder.stop()
             self.recorder = AudioRecorder(device_index=self.current_mic_index)
-            self.typer = Typer(wpm=self.config.get("typing_wpm", 40))
             self.improver = AIImprover(
                 api_key=self.config.get("gemini_api_key"),
                 model_name=self.config.get("gemini_model") or "gemini-1.5-flash",
@@ -612,10 +602,7 @@ class WhisperAppController:
         """(Re)start the GlobalHotKeys listener for the current record_mode."""
         if self.listener:
             self._stop_keyboard_listener(self.listener)
-        mapping = {
-            self.config["type_hotkey"]: self.on_type_confirm,
-            self.config["improve_hotkey"]: self.on_improve_text,
-        }
+        mapping = {self.config["improve_hotkey"]: self.on_improve_text}
         if self.config.get("record_mode", "toggle") != "hold":
             mapping[self.config["hotkey"]] = self.on_record_toggle
         self.listener = keyboard.GlobalHotKeys(mapping)
@@ -982,9 +969,6 @@ class WhisperAppController:
             except Exception:  # noqa: BLE001, S110
                 pass
 
-        # Stop typing if in progress
-        self.typing_stop_event.set()
-
         self._stop_keyboard_listener(self.listener)
         self._stop_keyboard_listener(self._hold_listener)
         self.listener = None
@@ -1341,61 +1325,6 @@ class WhisperAppController:
                     last_transcription_time = time.time()
                 except Exception:  # noqa: BLE001, S110
                     pass
-
-    def on_type_confirm(self) -> None:
-        """Confirm and start typing the transcribed text."""
-        if self.paused:
-            return
-
-        if self._is_typing:
-            self.log("Stopping typing simulation...")
-            self.typing_stop_event.set()
-            return
-
-        if self.pending_text:
-            text_to_type = self.pending_text
-            self.typing_stop_event.clear()
-            self._is_typing = True
-
-            threading.Thread(
-                target=self._async_typing_wrapper, args=(text_to_type,), daemon=True
-            ).start()
-        else:
-            self.log("No text to type.")
-
-    def _async_typing_wrapper(self, text: str) -> None:
-        """Wrap asynchronous typing simulation."""
-        try:
-            do_refocus = self.config.get("refocus_window", True)
-            if do_refocus and self.window_manager and self.target_window_handle:
-                if not self.window_manager.focus_window(self.target_window_handle):
-                    self.log("Failed to restore focus.")
-                    self._is_typing = False
-                    return
-                time.sleep(0.3)
-
-            if self.typer:
-                self.typer.type_text(
-                    text,
-                    stop_event=self.typing_stop_event,
-                    check_focus=self._check_typing_focus,
-                )
-
-                if self.typing_stop_event.is_set():
-                    self.log("Typing stopped.")
-                else:
-                    self.log("Typing finished.")
-        finally:
-            self._is_typing = False
-            self.set_status("Ready")
-
-    def _check_typing_focus(self) -> bool:
-        """Check if the target window still has focus."""
-        if not self.window_manager or not self.target_window_handle:
-            return True
-
-        active = self.window_manager.get_active_window()
-        return self._windows_match(active, self.target_window_handle)
 
     @staticmethod
     def _windows_match(first: object, second: object) -> bool:
