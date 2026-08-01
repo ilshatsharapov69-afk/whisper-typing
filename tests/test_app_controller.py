@@ -89,6 +89,46 @@ def test_start_listener(mock_dependencies: dict[str, Any]) -> None:
     assert controller.config["type_hotkey"] in hotkey_map
 
 
+def test_numpad_enter_is_consumed_by_the_windows_hook() -> None:
+    """Test that the PTT key cannot activate a focused PiP control."""
+    controller = WhisperAppController()
+    controller.config = {"hotkey": "numpad_enter", "extra_hotkeys": []}
+
+    with (
+        patch("whisper_typing.app_controller.keyboard.Listener") as listener_cls,
+        patch.object(controller, "_press_hold_key") as press_hold_key,
+    ):
+        controller._setup_hold_listener()  # noqa: SLF001
+        listener = listener_cls.return_value
+        event_filter = listener_cls.call_args.kwargs["win32_event_filter"]
+        key_data = MagicMock(vkCode=0x0D, flags=0x01)
+
+        assert event_filter(0x0100, key_data) is False
+
+    press_hold_key.assert_called_once_with("numpad_enter")
+    listener.suppress_event.assert_called_once_with()
+
+
+def test_main_enter_is_not_consumed_by_the_numpad_hook() -> None:
+    """Test that the ordinary Enter key remains unaffected."""
+    controller = WhisperAppController()
+    controller.config = {"hotkey": "numpad_enter", "extra_hotkeys": []}
+
+    with (
+        patch("whisper_typing.app_controller.keyboard.Listener") as listener_cls,
+        patch.object(controller, "_press_hold_key") as press_hold_key,
+    ):
+        controller._setup_hold_listener()  # noqa: SLF001
+        listener = listener_cls.return_value
+        event_filter = listener_cls.call_args.kwargs["win32_event_filter"]
+        key_data = MagicMock(vkCode=0x0D, flags=0)
+
+        assert event_filter(0x0100, key_data) is True
+
+    press_hold_key.assert_not_called()
+    listener.suppress_event.assert_not_called()
+
+
 def test_on_record_toggle_start(mock_dependencies: dict[str, Any]) -> None:  # noqa: ARG001
     """Test starting recording."""
     controller = WhisperAppController()

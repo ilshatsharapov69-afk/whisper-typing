@@ -1,7 +1,7 @@
-"""Tests for exact and fallback Windows media control."""
+"""Tests for exact, state-aware Windows media control."""
 
 import asyncio
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, call
 
 from whisper_typing.app_controller import MediaController
 
@@ -25,6 +25,11 @@ def test_pause_tracks_exact_playing_session_objects() -> None:
     controller._get_sessions = AsyncMock(  # type: ignore[method-assign]  # noqa: SLF001
         return_value=[playing, already_paused]
     )
+    playing.get_playback_info.side_effect = [
+        MagicMock(playback_status=4),
+        MagicMock(playback_status=5),
+        MagicMock(playback_status=5),
+    ]
 
     paused = asyncio.run(controller._async_pause_all())  # noqa: SLF001
     resumed = asyncio.run(controller._async_resume_sessions(paused))  # noqa: SLF001
@@ -35,23 +40,18 @@ def test_pause_tracks_exact_playing_session_objects() -> None:
     already_paused.try_play_async.assert_not_awaited()
 
 
-def test_pause_uses_pip_fallback_when_smtc_is_unavailable() -> None:
-    """Test that Picture-in-Picture pause survives a broken SMTC service."""
+def test_unavailable_smtc_never_sends_an_unverified_play_command() -> None:
+    """Test that a broken SMTC service leaves paused media unchanged."""
     messages: list[str] = []
     controller = MediaController(logger=messages.append)
     controller._async_pause_all = AsyncMock(  # type: ignore[method-assign]  # noqa: SLF001
         side_effect=OSError("service unavailable")
     )
-    controller._send_picture_in_picture_command = MagicMock(  # type: ignore[method-assign]  # noqa: SLF001
-        return_value=[123]
-    )
-    controller._send_global_command = MagicMock(  # type: ignore[method-assign]  # noqa: SLF001
-        return_value=None
-    )
 
-    assert controller.pause_if_playing() is True
-    assert controller._pip_windows == [123]  # noqa: SLF001
-    assert any("using fallback" in message for message in messages)
+    assert controller.pause_if_playing() is False
+    controller.resume()
+
+    assert any("state left unchanged" in message for message in messages)
 
 
 def test_nonplaying_session_is_never_marked_for_resume() -> None:
@@ -63,3 +63,34 @@ def test_nonplaying_session_is_never_marked_for_resume() -> None:
     paused = asyncio.run(controller._async_pause_all())  # noqa: SLF001
 
     assert paused == []
+
+
+def test_accepted_but_unconfirmed_pause_is_never_resumed() -> None:
+    """Test that request acceptance alone cannot create a PLAY lease."""
+    session = _session(4)
+    controller = MediaController()
+    controller._STATE_CONFIRM_ATTEMPTS = 2  # noqa: SLF001
+    controller._STATE_CONFIRM_DELAY_S = 0  # noqa: SLF001
+    controller._get_sessions = AsyncMock(  # type: ignore[method-assign]  # noqa: SLF001
+        return_value=[session]
+    )
+
+    paused = asyncio.run(controller._async_pause_all())  # noqa: SLF001
+    resumed = asyncio.run(controller._async_resume_sessions(paused))  # noqa: SLF001
+
+    assert paused == []
+    assert resumed == 0
+    session.try_pause_async.assert_awaited_once()
+    session.try_play_async.assert_not_awaited()
+    assert session.get_playback_info.call_args_list == [call(), call(), call()]
+
+
+def test_resume_never_restarts_a_session_that_is_no_longer_paused() -> None:
+    """Test that stopped or closed media cannot be restarted on key release."""
+    session = _session(3)
+    controller = MediaController()
+
+    resumed = asyncio.run(controller._async_resume_sessions([session]))  # noqa: SLF001
+
+    assert resumed == 0
+    session.try_play_async.assert_not_awaited()

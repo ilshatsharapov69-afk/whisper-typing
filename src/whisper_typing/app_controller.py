@@ -1,11 +1,11 @@
 """Main application controller for whisper-typing."""
 
+import asyncio
 import ctypes
 import json
 import os
 import threading
 import time
-from ctypes import wintypes
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -110,39 +110,32 @@ class MediaController:
     Pauses EVERY playing session, not just the "current" one — with several
     media apps open (browser tabs + player) Windows often reports a session
     that is not the one actually audible, which made pausing look random.
-    Resumes exactly the sessions it paused. Every call is bounded by a
-    timeout and never raises.
+    Resumes exactly the sessions whose transition to a non-playing state was
+    verified. Every call is bounded by a timeout and never raises.
     """
 
     _TIMEOUT_S: float = 3.0
-    _WM_APPCOMMAND: int = 0x0319
-    _APPCOMMAND_MEDIA_PLAY: int = 46
-    _APPCOMMAND_MEDIA_PAUSE: int = 47
-    _SMTO_ABORTIFHUNG: int = 0x0002
+    _STATE_CONFIRM_ATTEMPTS: int = 5
+    _STATE_CONFIRM_DELAY_S: float = 0.05
+    _PLAYING_STATUS: int = 4
+    _PAUSED_STATUS: int = 5
 
     def __init__(self, logger: "Callable[[str], None] | None" = None) -> None:
+        """Create an empty, thread-safe media pause lease."""
         self._log = logger or (lambda _: None)
         # Keep the actual session objects: source_app_user_model_id is not
         # unique (multiple Chrome tabs share it), and resuming by id used to
         # start tabs that had already been paused before recording.
         self._paused_sessions: list[Any] = []
-        self._pip_windows: list[int] = []
-        self._global_command_target: int | None = None
         self._lock = threading.RLock()
         self._last_smtc_error: str | None = None
 
     def pause_if_playing(self) -> bool:
         """Pause all playing media sessions. Returns True if we paused any."""
-        import asyncio
-
         with self._lock:
             # A stale state can remain after a failed/aborted take. Restore it
             # before creating a new pause lease.
-            if (
-                self._paused_sessions
-                or self._pip_windows
-                or self._global_command_target
-            ):
+            if self._paused_sessions:
                 self._resume_locked()
 
             try:
@@ -155,28 +148,16 @@ class MediaController:
                 if message != self._last_smtc_error:
                     self._log(
                         "Windows media sessions unavailable "
-                        f"({message}); using fallback."
+                        f"({message}); media state left unchanged."
                     )
                     self._last_smtc_error = message
                 self._paused_sessions = []
 
-            self._pip_windows = self._send_picture_in_picture_command(
-                self._APPCOMMAND_MEDIA_PAUSE
-            )
-            self._global_command_target = self._send_global_command(
-                self._APPCOMMAND_MEDIA_PAUSE
-            )
-            paused = bool(
-                self._paused_sessions
-                or self._pip_windows
-                or self._global_command_target
-            )
+            paused = bool(self._paused_sessions)
             if paused:
                 self._log(
-                    "Media pause requested "
-                    f"(sessions={len(self._paused_sessions)}, "
-                    f"PiP={len(self._pip_windows)}, "
-                    f"fallback={'yes' if self._global_command_target else 'no'})."
+                    "Media paused and verified "
+                    f"(sessions={len(self._paused_sessions)})."
                 )
             return paused
 
@@ -187,14 +168,8 @@ class MediaController:
 
     def _resume_locked(self) -> None:
         """Resume and clear the current pause lease while holding _lock."""
-        import asyncio
-
         sessions = self._paused_sessions
-        pip_windows = self._pip_windows
-        global_target = self._global_command_target
         self._paused_sessions = []
-        self._pip_windows = []
-        self._global_command_target = None
 
         resumed = 0
         if sessions:
@@ -207,22 +182,16 @@ class MediaController:
                 )
             except Exception as exc:  # noqa: BLE001
                 self._log(f"MediaController resume error: {exc}")
-        for hwnd in pip_windows:
-            if ctypes.windll.user32.IsWindow(hwnd):
-                self._send_app_command(hwnd, self._APPCOMMAND_MEDIA_PLAY)
-        if global_target and ctypes.windll.user32.IsWindow(global_target):
-            self._send_app_command(global_target, self._APPCOMMAND_MEDIA_PLAY)
-        if sessions or pip_windows or global_target:
+        if sessions:
             self._log(
-                "Media resume requested "
-                f"(sessions={resumed}/{len(sessions)}, PiP={len(pip_windows)}, "
-                f"fallback={'yes' if global_target else 'no'})."
+                "Media resumed "
+                f"(sessions={resumed}/{len(sessions)})."
             )
 
     async def _get_sessions(self) -> list[Any]:
         from winrt.windows.media.control import (
             GlobalSystemMediaTransportControlsSessionManager as Mgr,
-        )
+        )  # noqa: PLC0415
 
         manager = await Mgr.request_async()
         try:
@@ -238,115 +207,35 @@ class MediaController:
         for session in sessions:
             try:
                 info = session.get_playback_info()
-                # PlaybackStatus: 4=Playing, 5=Paused
-                if info.playback_status != 4:
+                if info.playback_status != self._PLAYING_STATUS:
                     continue
-                if await session.try_pause_async():
+                requested = await session.try_pause_async()
+                if requested and await self._wait_until_paused(session):
                     paused.append(session)
             except Exception:  # noqa: BLE001, S112
                 continue
         return paused
+
+    async def _wait_until_paused(self, session: Any) -> bool:  # noqa: ANN401
+        """Confirm that a pause request produced the exact paused state."""
+        for attempt in range(self._STATE_CONFIRM_ATTEMPTS):
+            if session.get_playback_info().playback_status == self._PAUSED_STATUS:
+                return True
+            if attempt + 1 < self._STATE_CONFIRM_ATTEMPTS:
+                await asyncio.sleep(self._STATE_CONFIRM_DELAY_S)
+        return False
 
     async def _async_resume_sessions(self, sessions: list[Any]) -> int:
         """Resume the exact session objects paused by this controller."""
         resumed = 0
         for session in sessions:
             try:
-                if await session.try_play_async():
+                status = session.get_playback_info().playback_status
+                if status == self._PAUSED_STATUS and await session.try_play_async():
                     resumed += 1
             except Exception:  # noqa: BLE001, S112
                 continue
         return resumed
-
-    def _send_app_command(self, hwnd: int, command: int) -> tuple[bool, bool]:
-        """Send an idempotent Windows media command without injecting keys."""
-        user32 = ctypes.windll.user32
-        send = user32.SendMessageTimeoutW
-        send.argtypes = (
-            wintypes.HWND,
-            wintypes.UINT,
-            wintypes.WPARAM,
-            wintypes.LPARAM,
-            wintypes.UINT,
-            wintypes.UINT,
-            ctypes.POINTER(ctypes.c_size_t),
-        )
-        send.restype = wintypes.LPARAM
-        result = ctypes.c_size_t()
-        delivered = bool(
-            send(
-                hwnd,
-                self._WM_APPCOMMAND,
-                hwnd,
-                command << 16,
-                self._SMTO_ABORTIFHUNG,
-                300,
-                ctypes.byref(result),
-            )
-        )
-        return delivered, bool(result.value)
-
-    def _send_global_command(self, command: int) -> int | None:
-        """Ask the shell's current media target to pause/play as a fallback."""
-        user32 = ctypes.windll.user32
-        hwnd = int(user32.GetForegroundWindow() or user32.GetShellWindow() or 0)
-        if not hwnd:
-            return None
-        delivered, handled = self._send_app_command(hwnd, command)
-        return hwnd if delivered and handled else None
-
-    def _send_picture_in_picture_command(self, command: int) -> list[int]:
-        """Pause Chrome/Edge Picture-in-Picture windows missed by SMTC."""
-        user32 = ctypes.windll.user32
-        candidates: list[int] = []
-        callback_type = ctypes.WINFUNCTYPE(
-            wintypes.BOOL,
-            wintypes.HWND,
-            wintypes.LPARAM,
-        )
-        screen_width = max(1, user32.GetSystemMetrics(0))
-        screen_height = max(1, user32.GetSystemMetrics(1))
-
-        def callback(hwnd: int, _lparam: int) -> bool:
-            if not user32.IsWindowVisible(hwnd):
-                return True
-            title_length = user32.GetWindowTextLengthW(hwnd)
-            title = ctypes.create_unicode_buffer(title_length + 1)
-            user32.GetWindowTextW(hwnd, title, title_length + 1)
-            class_name = ctypes.create_unicode_buffer(256)
-            user32.GetClassNameW(hwnd, class_name, 256)
-            normalized_title = title.value.casefold()
-            is_named_pip = any(
-                marker in normalized_title
-                for marker in (
-                    "picture in picture",
-                    "picture-in-picture",
-                    "картинка в картинке",
-                )
-            )
-            is_chromium = class_name.value == "Chrome_WidgetWin_1"
-            ex_style = user32.GetWindowLongW(hwnd, -20) & 0xFFFFFFFF
-            rect = wintypes.RECT()
-            user32.GetWindowRect(hwnd, ctypes.byref(rect))
-            width = max(0, rect.right - rect.left)
-            height = max(0, rect.bottom - rect.top)
-            is_small_topmost_chromium = bool(
-                is_chromium
-                and ex_style & 0x00000008  # WS_EX_TOPMOST
-                and width < screen_width * 0.8
-                and height < screen_height * 0.8
-            )
-            if is_named_pip or is_small_topmost_chromium:
-                candidates.append(int(hwnd))
-            return True
-
-        user32.EnumWindows(callback_type(callback), 0)
-        delivered: list[int] = []
-        for hwnd in dict.fromkeys(candidates):
-            sent, _handled = self._send_app_command(hwnd, command)
-            if sent:
-                delivered.append(hwnd)
-        return delivered
 
     def stop(self) -> None:
         """Restore media if the application exits during a recording."""
