@@ -2,12 +2,18 @@
 
 import threading
 from collections.abc import Generator
+from pathlib import Path
 from typing import Any
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
-from whisper_typing.app_controller import DEFAULT_CONFIG, WhisperAppController
+from whisper_typing.app_controller import (
+    DEFAULT_CONFIG,
+    WhisperAppController,
+    load_config,
+    save_config,
+)
 
 
 @pytest.fixture
@@ -19,6 +25,8 @@ def mock_dependencies() -> Generator[dict[str, Any]]:
         patch("whisper_typing.app_controller.Typer") as mock_typer,
         patch("whisper_typing.app_controller.AIImprover") as mock_improver,
         patch("whisper_typing.app_controller.WindowManager") as mock_window_manager,
+        patch("whisper_typing.app_controller.AudioOverlay") as mock_overlay,
+        patch("whisper_typing.app_controller.MediaController") as mock_media,
         patch("pynput.keyboard.GlobalHotKeys") as mock_hotkeys,
         patch("whisper_typing.app_controller.sd") as mock_sd,
     ):
@@ -28,6 +36,8 @@ def mock_dependencies() -> Generator[dict[str, Any]]:
             "typer": mock_typer,
             "improver": mock_improver,
             "window_manager": mock_window_manager,
+            "overlay": mock_overlay,
+            "media": mock_media,
             "hotkeys": mock_hotkeys,
             "sd": mock_sd,
         }
@@ -150,3 +160,56 @@ def test_on_improve_text(mock_dependencies: dict[str, Any]) -> None:  # noqa: AR
     with patch("threading.Thread") as mock_thread:
         controller.on_improve_text()
         mock_thread.assert_called_once()
+
+
+def test_processing_counter_tracks_overlapping_jobs(
+    mock_dependencies: dict[str, Any],  # noqa: ARG001
+) -> None:
+    """Test that one completed take cannot hide a second active job."""
+    controller = WhisperAppController()
+
+    controller._begin_processing()  # noqa: SLF001
+    controller._begin_processing()  # noqa: SLF001
+    controller._finish_processing()  # noqa: SLF001
+
+    assert controller.is_processing is True
+    controller._finish_processing()  # noqa: SLF001
+    assert controller.is_processing is False
+
+
+def test_open_history_exports_and_launches_report(
+    mock_dependencies: dict[str, Any],  # noqa: ARG001
+    tmp_path: Path,
+) -> None:
+    """Test tray history opens a visible standalone report."""
+    controller = WhisperAppController()
+    report = tmp_path / "history.html"
+    history = controller._persistent_history  # noqa: SLF001
+    with (
+        patch.object(history, "export_html", return_value=report),
+        patch("whisper_typing.app_controller.os.startfile") as mock_startfile,
+    ):
+        controller.open_history()
+
+    mock_startfile.assert_called_once_with(report)
+
+
+def test_config_round_trip_is_atomic_and_unicode_safe(tmp_path: Path) -> None:
+    """Test that Russian prompts survive configuration writes."""
+    path = tmp_path / "config.json"
+    config = {"format_prompt": "ну, типа — без mojibake"}
+
+    save_config(config, str(path))
+
+    assert load_config(str(path)) == config
+    assert not path.with_suffix(".json.tmp").exists()
+
+
+def test_windows_match_prefers_native_handle() -> None:
+    """Test safe focus comparison for separate wrappers of one HWND."""
+    first = MagicMock()
+    second = MagicMock()
+    first._hWnd = 42  # noqa: SLF001
+    second._hWnd = 42  # noqa: SLF001
+
+    assert WhisperAppController._windows_match(first, second) is True  # noqa: SLF001

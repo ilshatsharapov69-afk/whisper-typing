@@ -1,6 +1,5 @@
 """Tests for audio_capture module."""
 
-import time
 from unittest.mock import MagicMock, patch
 
 import numpy as np
@@ -96,6 +95,19 @@ def test_stop_when_not_recording(mock_input_stream: MagicMock) -> None:  # noqa:
     recorder = AudioRecorder(device_index=0)
     result = recorder.stop()
     assert result is None
+
+
+def test_stop_recovers_frames_after_stream_failure() -> None:
+    """Test that buffered speech survives recording=False after a stream crash."""
+    recorder = AudioRecorder(device_index=0)
+    buffered = np.ones((FAKE_FRAME_SIZE, 1), dtype=np.float32)
+    recorder.frames.append(buffered)
+    recorder.recording = False
+
+    result = recorder.stop()
+
+    assert result is not None
+    assert np.array_equal(result, buffered.flatten())
 
 
 @patch("sounddevice.InputStream")

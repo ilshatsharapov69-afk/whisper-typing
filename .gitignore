@@ -16,3 +16,6 @@ _audio_backup/
 history.json
 history.json.tmp
 history.json.corrupt
+_history.html
+_history.html.tmp
+config.json.tmp

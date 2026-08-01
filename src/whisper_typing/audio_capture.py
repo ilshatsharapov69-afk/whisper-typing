@@ -100,6 +100,7 @@ class AudioRecorder:
             self.last_error = f"{type(e).__name__}: {e}"
             try:
                 import logging
+
                 logging.getLogger("whisper_typing").exception(
                     "AudioRecorder._record crashed"
                 )
@@ -185,9 +186,10 @@ class AudioRecorder:
             The complete audio data as a 1D numpy array, or None if not recording.
 
         """
-        if not self.recording:
-            return None
-
+        # A PortAudio/USB failure sets ``recording`` to False in _record's
+        # finally block.  The old early return threw away every frame captured
+        # before that failure, which made a long dictation appear to vanish.
+        # Always stop/join and return any recoverable buffered audio.
         self.recording = False
         self._stop_event.set()
         if self.thread:

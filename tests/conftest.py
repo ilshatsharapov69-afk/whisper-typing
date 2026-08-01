@@ -15,6 +15,8 @@ def _isolate_diagnostics(tmp_path, monkeypatch):  # noqa: ANN001, ANN202
     production log and could clobber the user's real transcription history.
     """
     monkeypatch.setattr(diagnostics, "HISTORY_PATH", tmp_path / "history.json")
+    monkeypatch.setattr(diagnostics, "HISTORY_HTML_PATH", tmp_path / "history.html")
+    monkeypatch.setattr(diagnostics, "APP_DIR", tmp_path)
     monkeypatch.setattr(diagnostics, "AUDIO_BACKUP_DIR", tmp_path / "backups")
     monkeypatch.setattr(diagnostics, "LOG_PATH", tmp_path / "app.log")
     monkeypatch.setattr(diagnostics, "_logger", None)

@@ -12,7 +12,8 @@ A powerful, human-like background speech-to-text application for Windows that ru
 - **Human-like Typing**: Simulates natural typing with variable speed, random jitter, and intelligent pauses after punctuation.
 - **System Tray Icon**: Runs in the background with a color-coded tray icon (green = ready, red = recording, yellow = processing).
 - **Audio Overlay**: Floating audio level visualization while recording.
-- **Media Auto-Pause**: Automatically pauses your music/video when recording starts, resumes when done.
+- **Media Auto-Pause**: Pauses every Windows media session plus Chrome/Edge Picture-in-Picture when recording starts, then resumes only what the app paused.
+- **Recovery History**: Right-click the tray icon and choose **History** for a searchable local report with copy buttons and playable WAV backups.
 - **Hold-to-Record**: Hold the hotkey to record, release to stop (configurable: hold or toggle mode).
 - **Auto-Type**: Automatically types the transcribed text after recording stops.
 - **Global Hotkeys**: Control recording and typing from any application.
@@ -127,7 +128,11 @@ The app shows a system tray icon with state indicators:
 | Red | Recording — speak now |
 | Yellow | Processing / Loading / Typing |
 
-Right-click the tray icon to quit.
+Right-click the tray icon to configure the app, open **History**, pause hotkeys, or quit.
+
+History keeps up to 1,000 transcription records. The newest 100 raw recordings
+are retained in `_audio_backup/`, and older successful transcriptions are
+recovered from the rotating application logs during migration.
 
 ## Troubleshooting
 

@@ -54,6 +54,22 @@ _REPETITION_RE = re.compile(
     r"^(\b\w{1,12}\b)(?:[,.\s!?]+\1){2,}[,.\s!?]*$", re.IGNORECASE
 )
 
+# Credits and outro phrases are a frequent Whisper hallucination at the end of
+# otherwise valid long recordings.  Exact-match filtering cannot catch that
+# case, so strip only a final suffix (never the same words in the middle).
+_HALLUCINATION_SUFFIX_RE = re.compile(
+    r"\s*"
+    r"(?:"
+    r"продолжение\s+следует"
+    r"|субтитры\s+(?:сделал(?:\u0430|\u0438)?|подготовил(?:\u0430|\u0438)?"
+    r"|создал(?:\u0430|\u0438)?)[^.!?\n]{0,80}"
+    r"|(?:редактор|корректор)\s+субтитров[^.!?\n]{0,80}"
+    r"|(?:subtitles|captions)\s+by[^.!?\n]{0,80}"
+    r")"
+    r"[.!?…\s]*$",
+    re.IGNORECASE,
+)
+
 
 class Transcriber:
     """Handles speech-to-text conversion using Whisper models."""
@@ -114,7 +130,11 @@ class Transcriber:
             except Exception:  # noqa: BLE001
                 # CUDA not available — fall back to CPU
                 self.device = "cpu"
-                self.compute_type = "int8" if self._requested_compute_type == "auto" else self._requested_compute_type
+                self.compute_type = (
+                    "int8"
+                    if self._requested_compute_type == "auto"
+                    else self._requested_compute_type
+                )
 
         self.model = WhisperModel(
             self.model_name,
@@ -138,6 +158,18 @@ class Transcriber:
         if _REPETITION_RE.match(normalized):
             return True
         return False
+
+    @classmethod
+    def _clean_transcript(cls, text: str) -> str:
+        """Remove known hallucinations without discarding legitimate speech."""
+        cleaned = text.strip()
+        previous = None
+        while cleaned and cleaned != previous:
+            previous = cleaned
+            cleaned = _HALLUCINATION_SUFFIX_RE.sub("", cleaned).rstrip()
+        if cls._is_hallucination(cleaned):
+            return ""
+        return cleaned
 
     @staticmethod
     def _audio_is_silent(audio: np.ndarray, threshold: float = 0.002) -> bool:
@@ -182,10 +214,7 @@ class Transcriber:
             )
             text = " ".join([segment.text for segment in segments]).strip()
 
-        if self._is_hallucination(text):
-            return ""
-
-        return text
+        return self._clean_transcript(text)
 
     def transcribe_fast(self, audio_input: str | np.ndarray) -> str:
         """Fast transcription for live preview (greedy decoding, with VAD).
@@ -223,7 +252,4 @@ class Transcriber:
         finally:
             self._lock.release()
 
-        if self._is_hallucination(text):
-            return ""
-
-        return text
+        return self._clean_transcript(text)

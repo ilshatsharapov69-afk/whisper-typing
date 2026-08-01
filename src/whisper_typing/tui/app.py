@@ -15,7 +15,11 @@ from textual.widgets import Footer, Header, Label, RichLog, Static
 
 from whisper_typing.app_controller import WhisperAppController
 from whisper_typing.tray_icon import TrayManager
-from whisper_typing.tui.screens import ApiKeyPromptScreen, ConfigurationScreen, HistoryScreen
+from whisper_typing.tui.screens import (
+    ApiKeyPromptScreen,
+    ConfigurationScreen,
+    HistoryScreen,
+)
 
 
 class WhisperTui(App[None]):
@@ -332,7 +336,11 @@ class WhisperTui(App[None]):
 
     def _tray_history(self) -> None:
         """Handle history from tray icon."""
-        self.call_from_thread(self.action_history)
+        # The app normally runs with its terminal hidden, so a Textual modal
+        # was technically created but invisible. Open the standalone local
+        # report instead; this callback already runs only after the user clicks
+        # the tray command.
+        self.controller.open_history()
 
     def _tray_quit(self) -> None:
         """Handle quit from tray icon."""
@@ -348,6 +356,7 @@ class WhisperTui(App[None]):
         # Safety net: force exit after 3s if graceful quit hangs
         def _force_exit() -> None:
             import time
+
             time.sleep(3)
             os._exit(0)
 

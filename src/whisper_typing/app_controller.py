@@ -5,6 +5,7 @@ import json
 import os
 import threading
 import time
+from ctypes import wintypes
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -44,6 +45,8 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "auto_format": False,
     "visualizer_style": "bars",
     "visualizer_gradient": "green_red",
+    "record_mode": "toggle",
+    "auto_type": False,
     "format_prompt": (
         "You receive raw speech-to-text output. The speaker may switch between "
         "Russian and English freely, even mid-sentence. Your ONLY job:\n"
@@ -70,7 +73,7 @@ def load_config(config_path: str = "config.json") -> dict[str, Any]:
     path = Path(config_path)
     if path.exists():
         try:
-            with path.open() as f:
+            with path.open(encoding="utf-8") as f:
                 return json.load(f)
         except Exception:  # noqa: BLE001, S110
             pass
@@ -90,8 +93,13 @@ def save_config(config: dict[str, Any], config_path: str = "config.json") -> Non
         save_data = config.copy()
         save_data.pop("gemini_api_key", None)
 
-        with Path(config_path).open("w") as f:
-            json.dump(save_data, f, indent=4)
+        path = Path(config_path)
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        with tmp.open("w", encoding="utf-8") as f:
+            json.dump(save_data, f, ensure_ascii=False, indent=4)
+            f.flush()
+            os.fsync(f.fileno())
+        tmp.replace(path)
     except Exception:  # noqa: BLE001, S110
         pass
 
@@ -107,33 +115,109 @@ class MediaController:
     """
 
     _TIMEOUT_S: float = 3.0
+    _WM_APPCOMMAND: int = 0x0319
+    _APPCOMMAND_MEDIA_PLAY: int = 46
+    _APPCOMMAND_MEDIA_PAUSE: int = 47
+    _SMTO_ABORTIFHUNG: int = 0x0002
 
     def __init__(self, logger: "Callable[[str], None] | None" = None) -> None:
         self._log = logger or (lambda _: None)
-        # source_app_user_model_ids of the sessions we paused
-        self._paused_ids: list[str] = []
+        # Keep the actual session objects: source_app_user_model_id is not
+        # unique (multiple Chrome tabs share it), and resuming by id used to
+        # start tabs that had already been paused before recording.
+        self._paused_sessions: list[Any] = []
+        self._pip_windows: list[int] = []
+        self._global_command_target: int | None = None
+        self._lock = threading.RLock()
+        self._last_smtc_error: str | None = None
 
     def pause_if_playing(self) -> bool:
         """Pause all playing media sessions. Returns True if we paused any."""
         import asyncio
 
-        try:
-            count = asyncio.run(
-                asyncio.wait_for(self._async_pause_all(), self._TIMEOUT_S)
+        with self._lock:
+            # A stale state can remain after a failed/aborted take. Restore it
+            # before creating a new pause lease.
+            if (
+                self._paused_sessions
+                or self._pip_windows
+                or self._global_command_target
+            ):
+                self._resume_locked()
+
+            try:
+                self._paused_sessions = asyncio.run(
+                    asyncio.wait_for(self._async_pause_all(), self._TIMEOUT_S)
+                )
+                self._last_smtc_error = None
+            except Exception as exc:  # noqa: BLE001
+                message = f"{type(exc).__name__}: {exc}"
+                if message != self._last_smtc_error:
+                    self._log(
+                        "Windows media sessions unavailable "
+                        f"({message}); using fallback."
+                    )
+                    self._last_smtc_error = message
+                self._paused_sessions = []
+
+            self._pip_windows = self._send_picture_in_picture_command(
+                self._APPCOMMAND_MEDIA_PAUSE
             )
-        except Exception as e:  # noqa: BLE001
-            self._log(f"MediaController pause error: {e}")
-            return False
-        return count > 0
+            self._global_command_target = self._send_global_command(
+                self._APPCOMMAND_MEDIA_PAUSE
+            )
+            paused = bool(
+                self._paused_sessions
+                or self._pip_windows
+                or self._global_command_target
+            )
+            if paused:
+                self._log(
+                    "Media pause requested "
+                    f"(sessions={len(self._paused_sessions)}, "
+                    f"PiP={len(self._pip_windows)}, "
+                    f"fallback={'yes' if self._global_command_target else 'no'})."
+                )
+            return paused
 
     def resume(self) -> None:
         """Resume the sessions we previously paused."""
+        with self._lock:
+            self._resume_locked()
+
+    def _resume_locked(self) -> None:
+        """Resume and clear the current pause lease while holding _lock."""
         import asyncio
 
-        try:
-            asyncio.run(asyncio.wait_for(self._async_resume_all(), self._TIMEOUT_S))
-        except Exception as e:  # noqa: BLE001
-            self._log(f"MediaController resume error: {e}")
+        sessions = self._paused_sessions
+        pip_windows = self._pip_windows
+        global_target = self._global_command_target
+        self._paused_sessions = []
+        self._pip_windows = []
+        self._global_command_target = None
+
+        resumed = 0
+        if sessions:
+            try:
+                resumed = asyncio.run(
+                    asyncio.wait_for(
+                        self._async_resume_sessions(sessions),
+                        self._TIMEOUT_S,
+                    )
+                )
+            except Exception as exc:  # noqa: BLE001
+                self._log(f"MediaController resume error: {exc}")
+        for hwnd in pip_windows:
+            if ctypes.windll.user32.IsWindow(hwnd):
+                self._send_app_command(hwnd, self._APPCOMMAND_MEDIA_PLAY)
+        if global_target and ctypes.windll.user32.IsWindow(global_target):
+            self._send_app_command(global_target, self._APPCOMMAND_MEDIA_PLAY)
+        if sessions or pip_windows or global_target:
+            self._log(
+                "Media resume requested "
+                f"(sessions={resumed}/{len(sessions)}, PiP={len(pip_windows)}, "
+                f"fallback={'yes' if global_target else 'no'})."
+            )
 
     async def _get_sessions(self) -> list[Any]:
         from winrt.windows.media.control import (
@@ -148,10 +232,9 @@ class MediaController:
             session = manager.get_current_session()
             return [session] if session else []
 
-    async def _async_pause_all(self) -> int:
+    async def _async_pause_all(self) -> list[Any]:
         sessions = await self._get_sessions()
-        self._paused_ids = []
-        count = 0
+        paused: list[Any] = []
         for session in sessions:
             try:
                 info = session.get_playback_info()
@@ -159,33 +242,115 @@ class MediaController:
                 if info.playback_status != 4:
                     continue
                 if await session.try_pause_async():
-                    sid = getattr(session, "source_app_user_model_id", "") or ""
-                    self._paused_ids.append(sid)
-                    count += 1
+                    paused.append(session)
             except Exception:  # noqa: BLE001, S112
                 continue
-        if count:
-            self._log(f"Media paused ({count} session(s)).")
-        return count
+        return paused
 
-    async def _async_resume_all(self) -> None:
-        if not self._paused_ids:
-            return
-        sessions = await self._get_sessions()
+    async def _async_resume_sessions(self, sessions: list[Any]) -> int:
+        """Resume the exact session objects paused by this controller."""
         resumed = 0
         for session in sessions:
             try:
-                sid = getattr(session, "source_app_user_model_id", "") or ""
-                if sid in self._paused_ids:
-                    if await session.try_play_async():
-                        resumed += 1
+                if await session.try_play_async():
+                    resumed += 1
             except Exception:  # noqa: BLE001, S112
                 continue
-        self._log(f"Media resumed ({resumed}/{len(self._paused_ids)} session(s)).")
-        self._paused_ids = []
+        return resumed
+
+    def _send_app_command(self, hwnd: int, command: int) -> tuple[bool, bool]:
+        """Send an idempotent Windows media command without injecting keys."""
+        user32 = ctypes.windll.user32
+        send = user32.SendMessageTimeoutW
+        send.argtypes = (
+            wintypes.HWND,
+            wintypes.UINT,
+            wintypes.WPARAM,
+            wintypes.LPARAM,
+            wintypes.UINT,
+            wintypes.UINT,
+            ctypes.POINTER(ctypes.c_size_t),
+        )
+        send.restype = wintypes.LPARAM
+        result = ctypes.c_size_t()
+        delivered = bool(
+            send(
+                hwnd,
+                self._WM_APPCOMMAND,
+                hwnd,
+                command << 16,
+                self._SMTO_ABORTIFHUNG,
+                300,
+                ctypes.byref(result),
+            )
+        )
+        return delivered, bool(result.value)
+
+    def _send_global_command(self, command: int) -> int | None:
+        """Ask the shell's current media target to pause/play as a fallback."""
+        user32 = ctypes.windll.user32
+        hwnd = int(user32.GetForegroundWindow() or user32.GetShellWindow() or 0)
+        if not hwnd:
+            return None
+        delivered, handled = self._send_app_command(hwnd, command)
+        return hwnd if delivered and handled else None
+
+    def _send_picture_in_picture_command(self, command: int) -> list[int]:
+        """Pause Chrome/Edge Picture-in-Picture windows missed by SMTC."""
+        user32 = ctypes.windll.user32
+        candidates: list[int] = []
+        callback_type = ctypes.WINFUNCTYPE(
+            wintypes.BOOL,
+            wintypes.HWND,
+            wintypes.LPARAM,
+        )
+        screen_width = max(1, user32.GetSystemMetrics(0))
+        screen_height = max(1, user32.GetSystemMetrics(1))
+
+        def callback(hwnd: int, _lparam: int) -> bool:
+            if not user32.IsWindowVisible(hwnd):
+                return True
+            title_length = user32.GetWindowTextLengthW(hwnd)
+            title = ctypes.create_unicode_buffer(title_length + 1)
+            user32.GetWindowTextW(hwnd, title, title_length + 1)
+            class_name = ctypes.create_unicode_buffer(256)
+            user32.GetClassNameW(hwnd, class_name, 256)
+            normalized_title = title.value.casefold()
+            is_named_pip = any(
+                marker in normalized_title
+                for marker in (
+                    "picture in picture",
+                    "picture-in-picture",
+                    "картинка в картинке",
+                )
+            )
+            is_chromium = class_name.value == "Chrome_WidgetWin_1"
+            ex_style = user32.GetWindowLongW(hwnd, -20) & 0xFFFFFFFF
+            rect = wintypes.RECT()
+            user32.GetWindowRect(hwnd, ctypes.byref(rect))
+            width = max(0, rect.right - rect.left)
+            height = max(0, rect.bottom - rect.top)
+            is_small_topmost_chromium = bool(
+                is_chromium
+                and ex_style & 0x00000008  # WS_EX_TOPMOST
+                and width < screen_width * 0.8
+                and height < screen_height * 0.8
+            )
+            if is_named_pip or is_small_topmost_chromium:
+                candidates.append(int(hwnd))
+            return True
+
+        user32.EnumWindows(callback_type(callback), 0)
+        delivered: list[int] = []
+        for hwnd in dict.fromkeys(candidates):
+            sent, _handled = self._send_app_command(hwnd, command)
+            if sent:
+                delivered.append(hwnd)
+        return delivered
 
     def stop(self) -> None:
-        """Nothing to clean up."""
+        """Restore media if the application exits during a recording."""
+        self.resume()
 
 
 class WhisperAppController:
@@ -208,13 +373,17 @@ class WhisperAppController:
 
         self.is_processing: bool = False
         self._processing_start_time: float = 0.0
+        self._processing_jobs: int = 0
+        self._processing_lock = threading.Lock()
         self.pending_text: str | None = None
         self.paused: bool = False
 
         # History of transcriptions: persisted to history.json (survives
         # restarts, keeps failures + wav backup paths); in-memory view = last 10.
         self._persistent_history: PersistentHistory = PersistentHistory()
-        self.transcription_history: list[tuple[str, str]] = self._persistent_history.recent(10)
+        self.transcription_history: list[tuple[str, str]] = (
+            self._persistent_history.recent(50)
+        )
 
         # State tracking for optimization
         self.current_model_id: str | None = None
@@ -239,8 +408,12 @@ class WhisperAppController:
         # the right). Start on the first key down, stop on the last key up.
         self._hold_listener: keyboard.Listener | None = None
         self._hold_keys: set[Any] = set()  # pynput Key objects matched in the callbacks
-        self._hold_caps: bool = False  # CapsLock is a PTT key (needs OS-toggle suppression)
-        self._hold_numpad_enter: bool = False  # numpad Enter is a PTT key (handled in the hook filter)
+        self._hold_caps: bool = (
+            False  # CapsLock is a PTT key (needs OS-toggle suppression)
+        )
+        self._hold_numpad_enter: bool = (
+            False  # numpad Enter is a PTT key (handled in the hook filter)
+        )
         self._pressed_hold_keys: set[Any] = set()  # PTT keys currently held down
         # Serializes PTT start/stop: a quick re-press must wait for the
         # previous stop to finish, otherwise recorder.start() sees
@@ -282,8 +455,34 @@ class WhisperAppController:
         error: str | None = None,
     ) -> None:
         """Record a transcription (or failure) in history.json and refresh the in-memory view."""
-        self._persistent_history.add(text, status=status, audio_path=audio_path, error=error)
-        self.transcription_history = self._persistent_history.recent(10)
+        self._persistent_history.add(
+            text, status=status, audio_path=audio_path, error=error
+        )
+        self.transcription_history = self._persistent_history.recent(50)
+
+    def open_history(self) -> None:
+        """Open the persistent history report from the tray menu."""
+        try:
+            report = self._persistent_history.export_html()
+            os.startfile(report)  # noqa: S606
+            self.log(
+                f"History opened ({len(self._persistent_history.entries())} entries)."
+            )
+        except Exception as exc:  # noqa: BLE001
+            self.log(f"Could not open history: {exc}")
+
+    def _begin_processing(self) -> None:
+        """Register one background transcription/AI job."""
+        with self._processing_lock:
+            self._processing_jobs += 1
+            self.is_processing = True
+            self._processing_start_time = time.time()
+
+    def _finish_processing(self) -> None:
+        """Finish one background job without hiding other active jobs."""
+        with self._processing_lock:
+            self._processing_jobs = max(0, self._processing_jobs - 1)
+            self.is_processing = self._processing_jobs > 0
 
     def set_status(self, status: str) -> None:
         """Update the application status using the configured UI callback.
@@ -460,7 +659,9 @@ class WhisperAppController:
 
             # Configure and start overlay (hidden until recording)
             self.overlay.set_style(self.config.get("visualizer_style", "bars"))
-            self.overlay.set_gradient(self.config.get("visualizer_gradient", "green_red"))
+            self.overlay.set_gradient(
+                self.config.get("visualizer_gradient", "green_red")
+            )
             self.overlay.start()
 
             # Start persistent media controller for pause/resume
@@ -476,10 +677,10 @@ class WhisperAppController:
 
     def start_listener(self) -> None:
         """Start the hotkey listener."""
-        if self.listener:
-            self.listener.stop()
-        if self._hold_listener:
-            self._hold_listener.stop()
+        self._stop_keyboard_listener(self.listener)
+        self._stop_keyboard_listener(self._hold_listener)
+        self.listener = None
+        self._hold_listener = None
 
         record_mode = self.config.get("record_mode", "toggle")
 
@@ -489,23 +690,39 @@ class WhisperAppController:
                 self._setup_hold_listener()
                 self._start_global_hotkeys()
                 hotkey_name = self.config["hotkey"]
-                self.log(f"Hold-to-talk mode. Hold {hotkey_name} to record, release to transcribe+type.")
+                self.log(
+                    f"Hold-to-talk mode. Hold {hotkey_name} to record, "
+                    "release to transcribe+type."
+                )
             else:
                 self._start_global_hotkeys()
-                self.log(f"Hotkeys registered. Press {self.config['hotkey']} to record.")
+                self.log(
+                    f"Hotkeys registered. Press {self.config['hotkey']} to record."
+                )
             self._start_supervisor()
             self.set_status("Ready")
         except ValueError as e:
             self.log(f"Invalid hotkey format: {e}")
             self.set_status("Hotkey Error")
 
+    @staticmethod
+    def _stop_keyboard_listener(
+        listener: keyboard.Listener | keyboard.GlobalHotKeys | None,
+    ) -> None:
+        """Stop and join a pynput hook so no orphan hook keeps modifiers."""
+        if listener is None:
+            return
+        try:
+            listener.stop()
+            if listener is not threading.current_thread():
+                listener.join(timeout=1.0)
+        except Exception:  # noqa: BLE001, S110
+            pass
+
     def _start_global_hotkeys(self) -> None:
         """(Re)start the GlobalHotKeys listener for the current record_mode."""
         if self.listener:
-            try:
-                self.listener.stop()
-            except Exception:  # noqa: BLE001, S110
-                pass
+            self._stop_keyboard_listener(self.listener)
         mapping = {
             self.config["type_hotkey"]: self.on_type_confirm,
             self.config["improve_hotkey"]: self.on_improve_text,
@@ -555,7 +772,9 @@ class WhisperAppController:
                 if self.paused:
                     continue
                 # Never interfere mid-take
-                if self._pressed_hold_keys or (self.recorder and self.recorder.recording):
+                if self._pressed_hold_keys or (
+                    self.recorder and self.recorder.recording
+                ):
                     continue
                 if self.listener and not self.listener.running:
                     self._heal("hotkey listener thread died")
@@ -587,8 +806,8 @@ class WhisperAppController:
             return  # a take just started — try again next cycle
         self.log(f"Self-heal: {reason} — reinstalling hotkey listeners.")
         try:
-            if self._hold_listener:
-                self._hold_listener.stop()
+            self._stop_keyboard_listener(self._hold_listener)
+            self._hold_listener = None
         except Exception:  # noqa: BLE001, S110
             pass
         try:
@@ -635,7 +854,6 @@ class WhisperAppController:
                 self._hold_numpad_enter = True
             elif name == "caps_lock":
                 self._hold_caps = True
-                self._hold_keys.add(keyboard.Key.caps_lock)
             elif name in key_map:
                 self._hold_keys.add(key_map[name])
 
@@ -661,46 +879,49 @@ class WhisperAppController:
         def win32_event_filter(msg: int, data: Any) -> bool:  # noqa: ANN401
             # Any exception here would kill the pynput listener thread and
             # leave the PTT key silently dead — fail open instead.
+            suppress = False
             try:
                 vk = getattr(data, "vkCode", None)
                 # Liveness probe from the supervisor: acknowledge and swallow.
                 if vk == vk_probe:
                     self._probe_seen.set()
-                    self._hold_listener._suppress = True  # noqa: SLF001
-                    return False
+                    suppress = True
                 # Numpad Enter = VK_RETURN with the extended-key flag. The
                 # callback only ever sees a generic Key.enter and couldn't tell
                 # it from the main Enter, so drive recording here and swallow it.
                 # Injected (synthetic) Enters from other automation tools are
                 # ignored — only the physical key drives recording.
-                if (
+                elif (
                     self._hold_numpad_enter
                     and vk == vk_return
                     and (data.flags & llkhf_extended)
                     and not (data.flags & llkhf_injected)
                 ):
-                    self._hold_listener._suppress = True  # noqa: SLF001
                     if msg in (wm_keydown, wm_syskeydown):
                         self._press_hold_key("numpad_enter")
                     elif msg in (wm_keyup, wm_syskeyup):
                         self._release_hold_key("numpad_enter")
-                    return False  # don't deliver to on_press/on_release
+                    suppress = True
                 # CapsLock: swallow system-wide so it can't flip the OS lock,
-                # but still deliver physical presses to the callbacks so it
-                # drives recording. Ignore synthetic (injected) caps events.
-                if self._hold_caps and vk == vk_capital:
-                    self._hold_listener._suppress = True  # noqa: SLF001
-                    if data.flags & llkhf_injected:
-                        return False
-                    return True
-                self._hold_listener._suppress = False  # noqa: SLF001
-                return True
+                # and drive PTT directly in this filter. Using pynput's public
+                # per-event suppression avoids leaving a private global
+                # ``_suppress`` flag set, which could eat an unrelated Shift
+                # release after a hook failure.
+                elif self._hold_caps and vk == vk_capital:
+                    if not (data.flags & llkhf_injected):
+                        if msg in (wm_keydown, wm_syskeydown):
+                            self._press_hold_key("caps_lock")
+                        elif msg in (wm_keyup, wm_syskeyup):
+                            self._release_hold_key("caps_lock")
+                    suppress = True
             except Exception:  # noqa: BLE001
-                try:
-                    self._hold_listener._suppress = False  # noqa: SLF001
-                except Exception:  # noqa: BLE001, S110
-                    pass
                 return True
+
+            if suppress and self._hold_listener:
+                # suppress_event raises pynput's private control exception;
+                # keep this outside the catch above so the hook can consume it.
+                self._hold_listener.suppress_event()
+            return not suppress
 
         self._hold_listener = keyboard.Listener(
             on_press=on_press,
@@ -729,10 +950,14 @@ class WhisperAppController:
     def _cancel_recording(self) -> None:
         """Cancel an in-progress recording without transcribing."""
         if self.recorder and self.recorder.recording:
+            self._ptt_gen += 1
             self.stop_live_transcribe.set()
             if self.live_transcribe_thread:
                 self.live_transcribe_thread.join(timeout=1)
             self.recorder.stop()
+            if self._media:
+                self._media.resume()
+            self._we_paused_media = False
             self.log("Recording cancelled.")
             self.set_status("Ready")
 
@@ -817,9 +1042,13 @@ class WhisperAppController:
             )
             if not self.recorder.recording and not stream_died:
                 return
-            if self._we_paused_media and self._media:
+            # Invalidate a pause still in flight before resuming. This closes
+            # the release-time race where media became paused after the old
+            # boolean check and then stayed paused forever.
+            self._ptt_gen += 1
+            if self._media:
                 self._media.resume()
-                self._we_paused_media = False
+            self._we_paused_media = False
             self._stop_recording_and_type()
 
     def _verify_mic_alive(self) -> None:
@@ -842,7 +1071,10 @@ class WhisperAppController:
             rec.stop()
             # Restart while the take is still wanted: PTT key held, or
             # toggle mode (where recording runs until toggled off).
-            if self._pressed_hold_keys or self.config.get("record_mode", "toggle") != "hold":
+            if (
+                self._pressed_hold_keys
+                or self.config.get("record_mode", "toggle") != "hold"
+            ):
                 rec.start()
 
     def stop(self) -> None:
@@ -864,10 +1096,10 @@ class WhisperAppController:
         # Stop typing if in progress
         self.typing_stop_event.set()
 
-        if self.listener:
-            self.listener.stop()
-        if self._hold_listener:
-            self._hold_listener.stop()
+        self._stop_keyboard_listener(self.listener)
+        self._stop_keyboard_listener(self._hold_listener)
+        self.listener = None
+        self._hold_listener = None
         if self._media:
             self._media.stop()
         self.overlay.stop()
@@ -892,7 +1124,9 @@ class WhisperAppController:
             # Auto-reset if processing has been stuck for over 60 seconds
             if time.time() - self._processing_start_time > 60:
                 self.log("Processing timeout — resetting stuck state.")
-                self.is_processing = False
+                with self._processing_lock:
+                    self._processing_jobs = 0
+                    self.is_processing = False
             else:
                 self.log("Busy processing, ignoring record toggle.")
                 return
@@ -902,9 +1136,21 @@ class WhisperAppController:
             return
 
         if self.recorder.recording:
+            self._ptt_gen += 1
+            if self._media:
+                self._media.resume()
+            self._we_paused_media = False
             self._stop_recording()
         else:
+            self._we_paused_media = False
+            self._ptt_gen += 1
             self._start_recording()
+            if self.config.get("pause_media", True) and self._media:
+                threading.Thread(
+                    target=self._pause_media_bg,
+                    args=(self._ptt_gen,),
+                    daemon=True,
+                ).start()
 
     def _start_recording(self) -> None:
         """Handle the start of an audio recording session."""
@@ -951,8 +1197,7 @@ class WhisperAppController:
         audio_data = self.recorder.stop()
 
         if audio_data is not None:
-            self.is_processing = True
-            self._processing_start_time = time.time()
+            self._begin_processing()
 
             def process_audio() -> None:
                 # Backup the raw audio first — if transcription fails, the
@@ -972,18 +1217,22 @@ class WhisperAppController:
                                 self.on_preview_update(text, None)
                             self.set_status("Text Ready")
                         else:
-                            self._add_to_history("", status="empty", audio_path=backup_path)
+                            self._add_to_history(
+                                "", status="empty", audio_path=backup_path
+                            )
                             self.log("No text transcribed.")
                             self.set_status("Ready")
                 except Exception as e:  # noqa: BLE001
                     self._add_to_history(
-                        self.pending_text or "", status="error",
-                        audio_path=backup_path, error=str(e),
+                        self.pending_text or "",
+                        status="error",
+                        audio_path=backup_path,
+                        error=str(e),
                     )
                     self.log(f"Error: {e}")
                     self.set_status("Error")
                 finally:
-                    self.is_processing = False
+                    self._finish_processing()
 
             threading.Thread(target=process_audio, daemon=True).start()
         else:
@@ -992,6 +1241,10 @@ class WhisperAppController:
 
     def _stop_recording_and_type(self) -> None:
         """Stop recording, transcribe, and auto-type the result."""
+        # A new take may start while this one is transcribing. Keep the exact
+        # destination captured for this take instead of reading the mutable
+        # controller-wide handle when the GPU job eventually finishes.
+        target_window_handle = self.target_window_handle
         self.log("Stopping recording...")
         self.overlay.show_processing()  # Switch to yellow dot while transcribing
         self.set_status("Processing")
@@ -1011,8 +1264,7 @@ class WhisperAppController:
         audio_data = self.recorder.stop()
 
         if audio_data is not None:
-            self.is_processing = True
-            self._processing_start_time = time.time()
+            self._begin_processing()
 
             def process_and_type() -> None:
                 # Backup the raw audio first — if transcription fails, the
@@ -1053,22 +1305,26 @@ class WhisperAppController:
                             # Auto-type if enabled
                             if self.config.get("auto_type", False):
                                 self.set_status("Typing")
-                                self._auto_type_text(text)
+                                self._auto_type_text(text, target_window_handle)
                             else:
                                 self.set_status("Text Ready")
                         else:
-                            self._add_to_history("", status="empty", audio_path=backup_path)
+                            self._add_to_history(
+                                "", status="empty", audio_path=backup_path
+                            )
                             self.log("No text transcribed.")
                             self.set_status("Ready")
                 except Exception as e:  # noqa: BLE001
                     self._add_to_history(
-                        self.pending_text or "", status="error",
-                        audio_path=backup_path, error=str(e),
+                        self.pending_text or "",
+                        status="error",
+                        audio_path=backup_path,
+                        error=str(e),
                     )
                     self.log(f"Error: {e}")
                     self.set_status("Error")
                 finally:
-                    self.is_processing = False
+                    self._finish_processing()
                     # Don't yank the visualizer away from a NEW recording the
                     # user may have already started while we were transcribing.
                     if not (self.recorder and self.recorder.recording):
@@ -1082,21 +1338,55 @@ class WhisperAppController:
             self.overlay.hide()
             self.set_status("Ready")
 
-    def _auto_type_text(self, text: str) -> None:
+    def _auto_type_text(
+        self,
+        text: str,
+        target_window_handle: object | None = None,
+    ) -> None:
         """Auto-paste transcribed text into active window + keep in clipboard as backup."""
         import pyperclip
 
-        # Always copy to clipboard as backup
-        pyperclip.copy(text)
+        # The Windows clipboard is occasionally locked for a few milliseconds
+        # by another app. Retry instead of turning a valid transcription into
+        # an apparent loss or, worse, pasting stale clipboard contents.
+        clipboard_error: Exception | None = None
+        for attempt in range(5):
+            try:
+                pyperclip.copy(text)
+                clipboard_error = None
+                break
+            except Exception as exc:  # noqa: BLE001
+                clipboard_error = exc
+                time.sleep(0.05 * (attempt + 1))
+        if clipboard_error is not None:
+            self.log(
+                "Text is safe in History, but the clipboard was unavailable: "
+                f"{clipboard_error}"
+            )
+            self.set_status("Text Ready")
+            return
 
         # Refocus the target window where recording started
         do_refocus = self.config.get("refocus_window", True)
-        if do_refocus and self.window_manager and self.target_window_handle:
-            if not self.window_manager.focus_window(self.target_window_handle):
-                self.log(f"Clipboard ({len(text)} chars). Could not refocus — Ctrl+V to paste.")
+        if do_refocus and self.window_manager and target_window_handle:
+            if not self.window_manager.focus_window(target_window_handle):
+                self.log(
+                    f"Clipboard ({len(text)} chars). Could not refocus — "
+                    "Ctrl+V to paste."
+                )
                 self.set_status("Ready")
                 return
             time.sleep(0.15)
+            active = self.window_manager.get_active_window()
+            if active is not None and not self._windows_match(
+                active, target_window_handle
+            ):
+                self.log(
+                    f"Clipboard ({len(text)} chars). Focus changed — "
+                    "Ctrl+V to paste safely."
+                )
+                self.set_status("Ready")
+                return
 
         # Simulate Ctrl+V via Windows API directly (pynput Controller
         # conflicts with the active CapsLock suppress listener)
@@ -1105,11 +1395,20 @@ class WhisperAppController:
         VK_V = 0x56
         KEYEVENTF_KEYUP = 0x0002
 
-        user32.keybd_event(VK_CONTROL, 0, 0, 0)
-        user32.keybd_event(VK_V, 0, 0, 0)
-        time.sleep(0.05)
-        user32.keybd_event(VK_V, 0, KEYEVENTF_KEYUP, 0)
-        user32.keybd_event(VK_CONTROL, 0, KEYEVENTF_KEYUP, 0)
+        control_down = False
+        v_down = False
+        try:
+            user32.keybd_event(VK_CONTROL, 0, 0, 0)
+            control_down = True
+            user32.keybd_event(VK_V, 0, 0, 0)
+            v_down = True
+            time.sleep(0.05)
+        finally:
+            # Never leave a synthetic modifier held if injection fails midway.
+            if v_down:
+                user32.keybd_event(VK_V, 0, KEYEVENTF_KEYUP, 0)
+            if control_down:
+                user32.keybd_event(VK_CONTROL, 0, KEYEVENTF_KEYUP, 0)
 
         self.log(f"Auto-pasted ({len(text)} chars). Also in clipboard.")
         self.set_status("Ready")
@@ -1207,13 +1506,14 @@ class WhisperAppController:
             return True
 
         active = self.window_manager.get_active_window()
-        if (
-            active
-            and hasattr(active, "_hWnd")
-            and hasattr(self.target_window_handle, "_hWnd")
-        ):
-            return bool(active._hWnd == self.target_window_handle._hWnd)  # noqa: SLF001
-        return bool(active == self.target_window_handle)
+        return self._windows_match(active, self.target_window_handle)
+
+    @staticmethod
+    def _windows_match(first: object, second: object) -> bool:
+        """Compare pygetwindow objects by HWND when available."""
+        if hasattr(first, "_hWnd") and hasattr(second, "_hWnd"):
+            return bool(first._hWnd == second._hWnd)  # noqa: SLF001
+        return bool(first == second)
 
     def on_improve_text(self) -> None:
         """Improve the current pending text using AI."""
@@ -1228,7 +1528,7 @@ class WhisperAppController:
                 self.log("AI Improvement disabled: Gemini API Key missing.")
                 return
 
-            self.is_processing = True
+            self._begin_processing()
             self.set_status("Improving AI")
             self.log("Requesting AI improvement...")
 
@@ -1249,7 +1549,7 @@ class WhisperAppController:
                 except Exception as e:  # noqa: BLE001
                     self.log(f"AI Error: {e}")
                 finally:
-                    self.is_processing = False
+                    self._finish_processing()
 
             threading.Thread(target=run_improve, daemon=True).start()
         else:

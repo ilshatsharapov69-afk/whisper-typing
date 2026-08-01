@@ -185,6 +185,48 @@ def test_transcribe_allows_legitimate_text() -> None:
     assert result == "Thank you for the information about the project"
 
 
+def test_transcribe_strips_hallucinated_outro_from_valid_text() -> None:
+    """Test that a known outro suffix does not spoil a long transcription."""
+    with patch.object(_mock_fw, "WhisperModel") as mock_wm:
+        mock_instance = mock_wm.return_value
+        segment = MagicMock()
+        segment.text = "Это нормальная длинная диктовка. Продолжение следует..."
+        mock_instance.transcribe.return_value = ([segment], None)
+
+        transcriber = Transcriber()
+        result = transcriber.transcribe(_loud_audio())
+
+    assert result == "Это нормальная длинная диктовка."
+
+
+def test_transcribe_strips_variable_subtitle_credit_suffix() -> None:
+    """Test that variable subtitle-credit hallucinations are removed."""
+    with patch.object(_mock_fw, "WhisperModel") as mock_wm:
+        mock_instance = mock_wm.return_value
+        segment = MagicMock()
+        segment.text = "Полезный текст. Субтитры сделал DimaTorzok"
+        mock_instance.transcribe.return_value = ([segment], None)
+
+        transcriber = Transcriber()
+        result = transcriber.transcribe(_loud_audio())
+
+    assert result == "Полезный текст."
+
+
+def test_transcribe_keeps_outro_words_in_the_middle() -> None:
+    """Test that only a final hallucinated suffix is removed."""
+    with patch.object(_mock_fw, "WhisperModel") as mock_wm:
+        mock_instance = mock_wm.return_value
+        segment = MagicMock()
+        segment.text = "Фраза «продолжение следует» иногда появляется, и это проблема."
+        mock_instance.transcribe.return_value = ([segment], None)
+
+        transcriber = Transcriber()
+        result = transcriber.transcribe(_loud_audio())
+
+    assert result == "Фраза «продолжение следует» иногда появляется, и это проблема."
+
+
 def test_transcribe_vad_filter_enabled() -> None:
     """Test that VAD filter is passed to model.transcribe."""
     with patch.object(_mock_fw, "WhisperModel") as mock_wm:
