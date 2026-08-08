@@ -6,11 +6,13 @@ from unittest.mock import MagicMock, patch
 import numpy as np
 
 from whisper_typing.overlay import (
+    BAR_COUNT,
     MODE_PROCESSING,
     MODE_RECORDING,
     PROCESSING_FRAME_COUNT,
     PROCESSING_FRAME_MS,
     PROCESSING_SIZE,
+    VISUALIZER_ANALYSIS_INTERVAL_FRAMES,
     VISUALIZER_FRAME_MS,
     VISUALIZER_SAMPLE_COUNT,
     AudioOverlay,
@@ -74,10 +76,11 @@ def test_blue_spinner_uses_prerendered_frames() -> None:
 
 
 def test_processing_frames_are_antialiased_and_visibly_animated() -> None:
-    """Test the tiny spinner is smooth, transparent, and visibly animated."""
+    """Test the spinner is smooth, transparent, and visibly animated."""
     frames = _processing_pil_frames()
 
     assert len(frames) == PROCESSING_FRAME_COUNT
+    assert PROCESSING_FRAME_COUNT == 30  # noqa: PLR2004
     assert PROCESSING_SIZE == 48  # noqa: PLR2004
     assert all(frame.size == (PROCESSING_SIZE, PROCESSING_SIZE) for frame in frames)
     alpha = np.asarray(frames[0].getchannel("A"))
@@ -140,7 +143,7 @@ def test_voice_audio_produces_a_real_frequency_equalizer() -> None:
 
     levels = AudioOverlay._spectrum_levels(audio, sample_rate)  # noqa: SLF001
 
-    assert len(levels) == 32  # noqa: PLR2004
+    assert len(levels) == BAR_COUNT
     assert max(levels) > 0.5  # noqa: PLR2004
     assert max(levels) - min(levels) > 0.2  # noqa: PLR2004
 
@@ -151,7 +154,7 @@ def test_silence_keeps_equalizer_at_rest() -> None:
 
     levels = AudioOverlay._spectrum_levels(audio, 16000)  # noqa: SLF001
 
-    assert levels == [0.0] * 32
+    assert levels == [0.0] * BAR_COUNT
 
 
 def test_equalizer_uses_short_audio_window_for_responsive_motion() -> None:
@@ -161,13 +164,18 @@ def test_equalizer_uses_short_audio_window_for_responsive_motion() -> None:
     recorder.sample_rate = 16000
     recorder.get_recent_data.return_value = np.ones(1024, dtype=np.float32)
     overlay._recorder = recorder  # noqa: SLF001
-    overlay._spectrum_levels = MagicMock(return_value=[0.5] * 32)  # type: ignore[method-assign]  # noqa: SLF001
+    overlay._spectrum_levels = MagicMock(return_value=[0.5] * BAR_COUNT)  # type: ignore[method-assign]  # noqa: SLF001
 
     overlay._sample_audio()  # noqa: SLF001
 
     recorder.get_recent_data.assert_called_once_with(
         max_samples=VISUALIZER_SAMPLE_COUNT,
     )
+    assert overlay._bar_heights == [0.0] * BAR_COUNT  # noqa: SLF001
+    assert overlay._target_bar_heights == [0.5] * BAR_COUNT  # noqa: SLF001
+
+    overlay._animate_levels()  # noqa: SLF001
+
     target_level = 0.5
     assert all(
         0.0 < level < target_level
@@ -175,8 +183,8 @@ def test_equalizer_uses_short_audio_window_for_responsive_motion() -> None:
     )
 
 
-def test_recording_visualizer_schedules_smooth_sixty_fps_updates() -> None:
-    """Test recording frames use the same smooth cadence as processing."""
+def test_recording_visualizer_uses_a_lightweight_frame_rate() -> None:
+    """Test recording animation avoids a needless 60 FPS update loop."""
     overlay = AudioOverlay()
     root = MagicMock()
     overlay._root = root  # noqa: SLF001
@@ -188,6 +196,45 @@ def test_recording_visualizer_schedules_smooth_sixty_fps_updates() -> None:
         VISUALIZER_FRAME_MS,
         overlay._update_loop,  # noqa: SLF001
     )
+    assert VISUALIZER_FRAME_MS == 33  # noqa: PLR2004
+
+
+def test_equalizer_analyzes_audio_less_often_than_it_animates() -> None:
+    """Test expensive FFT sampling runs only on alternating visual frames."""
+    overlay = AudioOverlay()
+    root = MagicMock()
+    overlay._root = root  # noqa: SLF001
+    overlay._running = True  # noqa: SLF001
+    overlay._visible = True  # noqa: SLF001
+    overlay._recorder = MagicMock()  # noqa: SLF001
+    overlay._sample_audio = MagicMock()  # type: ignore[method-assign]  # noqa: SLF001
+    overlay._animate_levels = MagicMock()  # type: ignore[method-assign]  # noqa: SLF001
+    overlay._draw = MagicMock()  # type: ignore[method-assign]  # noqa: SLF001
+
+    for _ in range(VISUALIZER_ANALYSIS_INTERVAL_FRAMES):
+        overlay._update_loop()  # noqa: SLF001
+
+    overlay._sample_audio.assert_called_once_with()  # type: ignore[attr-defined]  # noqa: SLF001
+    assert overlay._animate_levels.call_count == 2  # type: ignore[attr-defined]  # noqa: PLR2004, SLF001
+    assert overlay._draw.call_count == 2  # type: ignore[attr-defined]  # noqa: PLR2004, SLF001
+
+
+def test_default_bars_use_one_canvas_item_per_frequency_band() -> None:
+    """Test the default visualizer avoids separate glow and cap objects."""
+    overlay = AudioOverlay()
+    canvas = MagicMock()
+    canvas.create_rectangle.side_effect = range(1, BAR_COUNT + 1)
+    overlay._canvas = canvas  # noqa: SLF001
+    overlay._win_h = 67  # noqa: SLF001
+
+    overlay._init_bars()  # noqa: SLF001
+    overlay._bar_heights = [0.5] * BAR_COUNT  # noqa: SLF001
+    overlay._draw_bars()  # noqa: SLF001
+
+    assert len(overlay._canvas_items) == BAR_COUNT  # noqa: SLF001
+    canvas.create_oval.assert_not_called()
+    assert canvas.coords.call_count == BAR_COUNT
+    assert canvas.itemconfig.call_count == BAR_COUNT
 
 
 def test_render_failure_rebuilds_and_keeps_animation_scheduled() -> None:

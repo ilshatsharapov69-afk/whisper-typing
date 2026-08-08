@@ -16,15 +16,16 @@ if TYPE_CHECKING:
     from whisper_typing.audio_capture import AudioRecorder
 
 # Layout
-BAR_COUNT = 32
+BAR_COUNT = 20
 BOTTOM_MARGIN = 60
 TRANSPARENT_COLOR = "#010101"
 PROCESSING_SIZE = 48
 PROCESSING_ITEM_COUNT = 1
-PROCESSING_FRAME_COUNT = 60
-PROCESSING_FRAME_MS = 16
-PROCESSING_RENDER_SCALE = 6
-VISUALIZER_FRAME_MS = 16
+PROCESSING_FRAME_COUNT = 30
+PROCESSING_FRAME_MS = 33
+PROCESSING_RENDER_SCALE = 4
+VISUALIZER_FRAME_MS = 33
+VISUALIZER_ANALYSIS_INTERVAL_FRAMES = 2
 VISUALIZER_SAMPLE_COUNT = 2048
 VISUALIZER_ATTACK = 0.4
 VISUALIZER_RELEASE = 0.17
@@ -225,6 +226,7 @@ class AudioOverlay:
         self._visible = False
         self._recorder: AudioRecorder | None = None
         self._bar_heights: list[float] = [0.0] * BAR_COUNT
+        self._target_bar_heights: list[float] = [0.0] * BAR_COUNT
         self._style: str = "bars"
         self._gradient_name: str = DEFAULT_GRADIENT
         self._gradient: list[tuple[float, tuple[int, int, int]]] = _GRADIENT_GREEN_RED
@@ -260,7 +262,7 @@ class AudioOverlay:
         if self._processing:
             return (PROCESSING_SIZE, PROCESSING_SIZE)
         bar_w, bar_gap, pad = 4, 2, 6
-        default_w = BAR_COUNT * (bar_w + bar_gap) - bar_gap + pad * 2  # ~198
+        default_w = BAR_COUNT * (bar_w + bar_gap) - bar_gap + pad * 2
         if self._style == "circles":
             return (140, 140)
         if self._style == "mirror":
@@ -352,7 +354,9 @@ class AudioOverlay:
                 if self._processing:
                     self._draw_processing()
                 elif self._recorder:
-                    self._sample_audio()
+                    if self._frame_count % VISUALIZER_ANALYSIS_INTERVAL_FRAMES == 0:
+                        self._sample_audio()
+                    self._animate_levels()
                     self._draw()
                 else:
                     for i in range(BAR_COUNT):
@@ -404,7 +408,7 @@ class AudioOverlay:
         self._canvas_items = [spinner]
 
     def _draw_processing(self) -> None:
-        """Advance the pre-rendered blue spinner at 60 FPS."""
+        """Advance the lightweight pre-rendered blue spinner."""
         c = self._canvas
         if (
             not c
@@ -421,21 +425,24 @@ class AudioOverlay:
         )
 
     def _sample_audio(self) -> None:
-        """Sample audio data into bar heights."""
+        """Sample audio into target levels at a deliberately low cadence."""
         if not self._recorder:
             return
         audio = self._recorder.get_recent_data(max_samples=VISUALIZER_SAMPLE_COUNT)
         if audio is not None and len(audio) > 0:
-            levels = self._spectrum_levels(audio, self._recorder.sample_rate)
-            for i, level in enumerate(levels):
-                if level > self._bar_heights[i]:
-                    blend = VISUALIZER_ATTACK
-                else:
-                    blend = VISUALIZER_RELEASE
-                self._bar_heights[i] += (level - self._bar_heights[i]) * blend
+            self._target_bar_heights = self._spectrum_levels(
+                audio,
+                self._recorder.sample_rate,
+            )
         else:
-            for i in range(BAR_COUNT):
-                self._bar_heights[i] *= 0.85
+            self._target_bar_heights = [0.0] * BAR_COUNT
+
+    def _animate_levels(self) -> None:
+        """Cheaply interpolate bars between the less frequent FFT samples."""
+        for i, target in enumerate(self._target_bar_heights):
+            current = self._bar_heights[i]
+            blend = VISUALIZER_ATTACK if target > current else VISUALIZER_RELEASE
+            self._bar_heights[i] += (target - current) * blend
 
     @staticmethod
     def _spectrum_levels(audio: np.ndarray, sample_rate: int) -> list[float]:
@@ -453,16 +460,18 @@ class AudioOverlay:
             return [0.0] * BAR_COUNT
 
         spectrum = np.abs(np.fft.rfft(samples * np.hanning(sample_count)))
-        frequencies = np.fft.rfftfreq(sample_count, d=1.0 / sample_rate)
         max_frequency = min(sample_rate / 2 * 0.95, 7600.0)
         edges = np.geomspace(70.0, max_frequency, BAR_COUNT + 1)
+        edge_bins = np.clip(
+            np.ceil(edges * sample_count / sample_rate).astype(np.intp),
+            0,
+            len(spectrum),
+        )
         energies = np.zeros(BAR_COUNT, dtype=np.float64)
         for index in range(BAR_COUNT):
-            mask = (frequencies >= edges[index]) & (
-                frequencies < edges[index + 1]
-            )
-            if np.any(mask):
-                energies[index] = float(np.sqrt(np.mean(spectrum[mask] ** 2)))
+            band = spectrum[edge_bins[index] : edge_bins[index + 1]]
+            if band.size:
+                energies[index] = float(np.sqrt(np.mean(band**2)))
 
         peak = float(np.max(energies))
         if peak <= MIN_SPECTRUM_PEAK:
@@ -492,16 +501,12 @@ class AudioOverlay:
         bar_w, bar_gap, pad = 4, 2, 6
         c = self._canvas
         bottom = self._win_h - pad
-        # Glow + bar + cap per bar
+        # One item per band keeps the decorative overlay very inexpensive.
         for i in range(BAR_COUNT):
             bx = pad + i * (bar_w + bar_gap)
-            glow = c.create_rectangle(bx - 2, bottom, bx + bar_w + 2, bottom,
-                                      fill=TRANSPARENT_COLOR, outline="")
             bar = c.create_rectangle(bx, bottom, bx + bar_w, bottom,
                                      fill=TRANSPARENT_COLOR, outline="")
-            cap = c.create_oval(bx - 1, bottom - 2, bx + bar_w + 1, bottom + 2,
-                                fill=TRANSPARENT_COLOR, outline="")
-            self._canvas_items.append((glow, bar, cap))
+            self._canvas_items.append(bar)
 
     def _draw_bars(self) -> None:
         c = self._canvas
@@ -517,16 +522,9 @@ class AudioOverlay:
             top = bottom - h
             ratio = h / max_h
             color = _lerp_gradient(ratio, self._gradient)
-            glow_c = _dim_color(color, 0.18)
-            glow, bar, cap = self._canvas_items[i]
-            c.coords(glow, bx - 2, bottom - h - 4, bx + bar_w + 2, bottom)
-            c.itemconfig(glow, fill=glow_c)
+            bar = self._canvas_items[i]
             c.coords(bar, bx, top, bx + bar_w, bottom)
             c.itemconfig(bar, fill=color)
-            cr = bar_w // 2 + 1
-            cx = bx + bar_w // 2
-            c.coords(cap, cx - cr, top - 1, cx + cr, top + cr)
-            c.itemconfig(cap, fill=color)
 
     # ── Style: MIRROR (symmetric bars from center) ───────────────────────
 
@@ -747,6 +745,7 @@ class AudioOverlay:
         self._recorder = recorder
         self._pending_mode = MODE_RECORDING
         self._bar_heights = [0.0] * BAR_COUNT
+        self._target_bar_heights = [0.0] * BAR_COUNT
         self._dot_peaks = [0.0] * BAR_COUNT
         self._dot_velocities = [0.0] * BAR_COUNT
         if self._root:
