@@ -78,7 +78,7 @@ def test_processing_frames_are_antialiased_and_visibly_animated() -> None:
     frames = _processing_pil_frames()
 
     assert len(frames) == PROCESSING_FRAME_COUNT
-    assert PROCESSING_SIZE == 24  # noqa: PLR2004
+    assert PROCESSING_SIZE == 48  # noqa: PLR2004
     assert all(frame.size == (PROCESSING_SIZE, PROCESSING_SIZE) for frame in frames)
     alpha = np.asarray(frames[0].getchannel("A"))
     fully_opaque = 255

@@ -19,7 +19,7 @@ if TYPE_CHECKING:
 BAR_COUNT = 32
 BOTTOM_MARGIN = 60
 TRANSPARENT_COLOR = "#010101"
-PROCESSING_SIZE = 24
+PROCESSING_SIZE = 48
 PROCESSING_ITEM_COUNT = 1
 PROCESSING_FRAME_COUNT = 60
 PROCESSING_FRAME_MS = 16
@@ -53,8 +53,8 @@ def _processing_pil_frames() -> list[Image.Image]:
     scale = PROCESSING_RENDER_SCALE
     size = PROCESSING_SIZE * scale
     center = size / 2
-    ring_radius = 7.6 * scale
-    ring_width = round(2.0 * scale)
+    ring_radius = 15.2 * scale
+    ring_width = round(4.0 * scale)
     ring_bounds = (
         center - ring_radius,
         center - ring_radius,
@@ -83,7 +83,7 @@ def _processing_pil_frames() -> list[Image.Image]:
             start=angle,
             end=end,
             fill=(*color, round(alpha * 0.58)),
-            width=ring_width + round(1.1 * scale),
+            width=ring_width + round(2.2 * scale),
         )
         crisp_draw.arc(
             ring_bounds,
@@ -92,7 +92,7 @@ def _processing_pil_frames() -> list[Image.Image]:
             fill=(*color, alpha),
             width=ring_width,
         )
-    trail = glow.filter(ImageFilter.GaussianBlur(1.25 * scale))
+    trail = glow.filter(ImageFilter.GaussianBlur(2.5 * scale))
     trail.alpha_composite(crisp)
     head_x = center + ring_radius * math.cos(math.radians(head_phase))
     head_y = center + ring_radius * math.sin(math.radians(head_phase))
