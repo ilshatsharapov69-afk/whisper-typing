@@ -225,7 +225,11 @@ def test_on_record_toggle_stop(mock_dependencies: dict[str, Any]) -> None:  # no
     mock_recorder = controller.recorder
     # Set to recording state
     mock_recorder.recording = True
-    mock_recorder.stop.return_value = None
+
+    def stop_recorder() -> None:
+        mock_recorder.recording = False
+
+    mock_recorder.stop.side_effect = stop_recorder
     controller.stop_live_transcribe = threading.Event()
 
     # Trigger toggle (Stop)
@@ -233,6 +237,8 @@ def test_on_record_toggle_stop(mock_dependencies: dict[str, Any]) -> None:  # no
 
     mock_recorder.stop.assert_called_once()
     assert controller.stop_live_transcribe.is_set()
+    controller.overlay.show_processing.assert_called_once_with()
+    controller.overlay.hide.assert_called_once_with()
 
 
 def test_toggle_stop_keeps_auto_type_behavior(
@@ -298,6 +304,25 @@ def test_processing_counter_tracks_overlapping_jobs(
     assert controller.is_processing is True
     controller._finish_processing()  # noqa: SLF001
     assert controller.is_processing is False
+
+
+def test_processing_spinner_stays_until_every_job_finishes(
+    mock_dependencies: dict[str, Any],  # noqa: ARG001
+) -> None:
+    """Test an earlier transcription cannot hide a newer processing spinner."""
+    controller = WhisperAppController()
+
+    controller._begin_processing()  # noqa: SLF001
+    controller._begin_processing()  # noqa: SLF001
+    controller._finish_processing()  # noqa: SLF001
+    controller._hide_overlay_if_idle()  # noqa: SLF001
+
+    controller.overlay.hide.assert_not_called()
+
+    controller._finish_processing()  # noqa: SLF001
+    controller._hide_overlay_if_idle()  # noqa: SLF001
+
+    controller.overlay.hide.assert_called_once_with()
 
 
 def test_open_history_exports_and_launches_report(

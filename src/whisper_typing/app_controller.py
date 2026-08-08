@@ -383,6 +383,12 @@ class WhisperAppController:
             self._processing_jobs = max(0, self._processing_jobs - 1)
             self.is_processing = self._processing_jobs > 0
 
+    def _hide_overlay_if_idle(self) -> None:
+        """Hide feedback only when no take or processing job still owns it."""
+        recording = bool(self.recorder and self.recorder.recording)
+        if not self.is_processing and not recording:
+            self.overlay.hide()
+
     def set_status(self, status: str) -> None:
         """Update the application status using the configured UI callback.
 
@@ -1127,6 +1133,7 @@ class WhisperAppController:
     def _stop_recording(self) -> None:
         """Handle the end of an audio recording session."""
         self.log("Stopping recording...")
+        self.overlay.show_processing()
         self.set_status("Processing")
 
         # Stop live transcription loop
@@ -1138,6 +1145,7 @@ class WhisperAppController:
             self.live_transcribe_thread = None
 
         if not self.recorder:
+            self._hide_overlay_if_idle()
             return
 
         audio_data = self.recorder.stop()
@@ -1179,10 +1187,12 @@ class WhisperAppController:
                     self.set_status("Error")
                 finally:
                     self._finish_processing()
+                    self._hide_overlay_if_idle()
 
             threading.Thread(target=process_audio, daemon=True).start()
         else:
             self.log("No audio data.")
+            self._hide_overlay_if_idle()
             self.set_status("Ready")
 
     def _stop_recording_and_type(self) -> None:
@@ -1192,7 +1202,7 @@ class WhisperAppController:
         # controller-wide handle when the GPU job eventually finishes.
         target_window_handle = self.target_window_handle
         self.log("Stopping recording...")
-        self.overlay.show_processing()  # Switch to yellow dot while transcribing
+        self.overlay.show_processing()
         self.set_status("Processing")
 
         # Stop live transcription loop
@@ -1204,7 +1214,7 @@ class WhisperAppController:
             self.live_transcribe_thread = None
 
         if not self.recorder:
-            self.overlay.hide()
+            self._hide_overlay_if_idle()
             return
 
         audio_data = self.recorder.stop()
@@ -1271,17 +1281,14 @@ class WhisperAppController:
                     self.set_status("Error")
                 finally:
                     self._finish_processing()
-                    # Don't yank the visualizer away from a NEW recording the
-                    # user may have already started while we were transcribing.
-                    if not (self.recorder and self.recorder.recording):
-                        self.overlay.hide()
+                    self._hide_overlay_if_idle()
 
             threading.Thread(target=process_and_type, daemon=True).start()
         else:
             err = self.recorder.last_error if self.recorder else None
             self._add_to_history("", status="error", error=err or "no audio captured")
             self.log(f"No audio data ({err or 'unknown reason'}).")
-            self.overlay.hide()
+            self._hide_overlay_if_idle()
             self.set_status("Ready")
 
     def _auto_type_text(

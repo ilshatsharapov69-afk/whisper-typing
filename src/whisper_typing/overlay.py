@@ -1,7 +1,9 @@
 """Floating audio visualizer overlay for whisper-typing."""
 
+from __future__ import annotations
+
+import contextlib
 import math
-import random
 import threading
 import tkinter as tk
 from typing import TYPE_CHECKING, Any
@@ -15,6 +17,13 @@ if TYPE_CHECKING:
 BAR_COUNT = 32
 BOTTOM_MARGIN = 60
 TRANSPARENT_COLOR = "#010101"
+PROCESSING_SIZE = 72
+PROCESSING_BLUE = "#278cff"
+PROCESSING_HIGHLIGHT = "#a8d8ff"
+PROCESSING_TRACK = "#12355f"
+PROCESSING_GLOW = "#071c3d"
+PROCESSING_ITEM_COUNT = 5
+MIN_DRAW_POINTS = 4
 
 # Available visualizer styles
 STYLES = [
@@ -74,7 +83,10 @@ GRADIENTS = {
 DEFAULT_GRADIENT = "green_red"
 
 
-def _lerp_gradient(ratio: float, gradient: list[tuple[float, tuple[int, int, int]]]) -> str:
+def _lerp_gradient(
+    ratio: float,
+    gradient: list[tuple[float, tuple[int, int, int]]],
+) -> str:
     """Interpolate gradient color by ratio 0..1."""
     ratio = max(0.0, min(1.0, ratio))
     for i in range(len(gradient) - 1):
@@ -111,7 +123,7 @@ class AudioOverlay:
         self._thread: threading.Thread | None = None
         self._running = False
         self._visible = False
-        self._recorder: "AudioRecorder | None" = None
+        self._recorder: AudioRecorder | None = None
         self._bar_heights: list[float] = [0.0] * BAR_COUNT
         self._style: str = "bars"
         self._gradient_name: str = DEFAULT_GRADIENT
@@ -119,6 +131,7 @@ class AudioOverlay:
         self._canvas_items: list[Any] = []
         self._extra_items: list[Any] = []
         self._frame_count: int = 0
+        self._processing: bool = False
         # For dots style — peak trackers
         self._dot_peaks: list[float] = [0.0] * BAR_COUNT
         self._dot_velocities: list[float] = [0.0] * BAR_COUNT
@@ -141,6 +154,8 @@ class AudioOverlay:
 
     def _get_dimensions(self) -> tuple[int, int]:
         """Return (width, height) for the current style."""
+        if self._processing:
+            return (PROCESSING_SIZE, PROCESSING_SIZE)
         bar_w, bar_gap, pad = 4, 2, 6
         default_w = BAR_COUNT * (bar_w + bar_gap) - bar_gap + pad * 2  # ~198
         if self._style == "circles":
@@ -163,8 +178,8 @@ class AudioOverlay:
         """Run the tkinter main loop."""
         self._root = tk.Tk()
         self._root.title("Whisper Overlay")
-        self._root.overrideredirect(True)
-        self._root.attributes("-topmost", True)
+        self._root.overrideredirect(True)  # noqa: FBT003
+        self._root.attributes("-topmost", True)  # noqa: FBT003
         self._root.configure(bg=TRANSPARENT_COLOR)
         self._root.attributes("-transparentcolor", TRANSPARENT_COLOR)
 
@@ -203,8 +218,10 @@ class AudioOverlay:
         self._extra_items = []
         self._frame_count = 0
 
-        # Pre-create canvas items for each style
-        if self._style == "bars":
+        # Pre-create canvas items for the current mode/style.
+        if self._processing:
+            self._init_processing()
+        elif self._style == "bars":
             self._init_bars()
         elif self._style == "mirror":
             self._init_mirror()
@@ -223,14 +240,74 @@ class AudioOverlay:
         if not self._running or not self._root:
             return
         if self._visible:
-            if self._recorder:
+            if self._processing:
+                self._draw_processing()
+            elif self._recorder:
                 self._sample_audio()
+                self._draw()
             else:
                 for i in range(BAR_COUNT):
                     self._bar_heights[i] *= 0.85
-            self._draw()
+                self._draw()
             self._frame_count += 1
         self._root.after(33, self._update_loop)
+
+    def _init_processing(self) -> None:
+        """Create a compact blue spinner for speech-to-text processing."""
+        c = self._canvas
+        if not c:
+            return
+        cx, cy = self._win_w / 2, self._win_h / 2
+        radius = 22
+        bounds = (cx - radius, cy - radius, cx + radius, cy + radius)
+        glow = c.create_oval(*bounds, outline=PROCESSING_GLOW, width=9)
+        track = c.create_oval(*bounds, outline=PROCESSING_TRACK, width=5)
+        arc = c.create_arc(
+            *bounds,
+            start=0,
+            extent=105,
+            style=tk.ARC,
+            outline=PROCESSING_BLUE,
+            width=5,
+        )
+        highlight = c.create_arc(
+            *bounds,
+            start=72,
+            extent=30,
+            style=tk.ARC,
+            outline=PROCESSING_HIGHLIGHT,
+            width=2,
+        )
+        center = c.create_oval(
+            cx - 3,
+            cy - 3,
+            cx + 3,
+            cy + 3,
+            fill=PROCESSING_BLUE,
+            outline="",
+        )
+        self._canvas_items = [glow, track, arc, highlight, center]
+
+    def _draw_processing(self) -> None:
+        """Rotate and pulse the blue processing spinner."""
+        c = self._canvas
+        if not c or len(self._canvas_items) < PROCESSING_ITEM_COUNT:
+            return
+        phase = (self._frame_count * 11) % 360
+        pulse = 0.5 + 0.5 * math.sin(self._frame_count * 0.16)
+        glow, _track, arc, highlight, center = self._canvas_items
+        c.itemconfig(glow, outline=_dim_color(PROCESSING_BLUE, 0.12 + pulse * 0.08))
+        c.itemconfig(arc, start=phase)
+        c.itemconfig(highlight, start=(phase + 72) % 360)
+        cx, cy = self._win_w / 2, self._win_h / 2
+        dot_radius = 2.5 + pulse * 1.5
+        c.coords(
+            center,
+            cx - dot_radius,
+            cy - dot_radius,
+            cx + dot_radius,
+            cy + dot_radius,
+        )
 
     def _sample_audio(self) -> None:
         """Sample audio data into bar heights."""
@@ -270,7 +347,6 @@ class AudioOverlay:
 
     def _init_bars(self) -> None:
         bar_w, bar_gap, pad = 4, 2, 6
-        max_h = self._win_h - pad * 2
         c = self._canvas
         bottom = self._win_h - pad
         # Glow + bar + cap per bar
@@ -373,9 +449,12 @@ class AudioOverlay:
             wobble = math.sin(self._frame_count * 0.1 + i * 0.5) * amp * 0.15
             y = mid_y - amp - wobble
             points.extend([x, y])
-        if len(points) < 4:
+        if len(points) < MIN_DRAW_POINTS:
             return
-        color = _lerp_gradient(max(self._bar_heights) if self._bar_heights else 0, self._gradient)
+        color = _lerp_gradient(
+            max(self._bar_heights) if self._bar_heights else 0,
+            self._gradient,
+        )
         glow_c = _dim_color(color, 0.25)
         c.coords(self._canvas_items[0], *points)
         c.itemconfig(self._canvas_items[0], fill=glow_c)
@@ -449,7 +528,11 @@ class AudioOverlay:
         for row in range(rows):
             for col in range(cols):
                 bar_idx = col * BAR_COUNT // cols
-                level = self._bar_heights[bar_idx] if bar_idx < len(self._bar_heights) else 0
+                level = (
+                    self._bar_heights[bar_idx]
+                    if bar_idx < len(self._bar_heights)
+                    else 0
+                )
                 filled_rows = int(level * rows)
                 row_from_bottom = rows - 1 - row
                 if row_from_bottom < filled_rows:
@@ -497,16 +580,18 @@ class AudioOverlay:
             else:
                 self._dot_velocities[i] += 0.4  # gravity
                 self._dot_peaks[i] -= self._dot_velocities[i]
-                if self._dot_peaks[i] < 0:
-                    self._dot_peaks[i] = 0
+                self._dot_peaks[i] = max(self._dot_peaks[i], 0)
             peak_y = bottom - self._dot_peaks[i]
             dr = 2
             c.coords(self._extra_items[i], x - dr, peak_y - dr, x + dr, peak_y + dr)
             ratio = self._dot_peaks[i] / max_h if max_h > 0 else 0
             dc = _lerp_gradient(ratio, self._gradient)
-            c.itemconfig(self._extra_items[i], fill=dc if self._dot_peaks[i] > 1 else TRANSPARENT_COLOR)
+            c.itemconfig(
+                self._extra_items[i],
+                fill=dc if self._dot_peaks[i] > 1 else TRANSPARENT_COLOR,
+            )
 
-        if len(points) >= 4:
+        if len(points) >= MIN_DRAW_POINTS:
             avg_level = sum(self._bar_heights) / n if n else 0
             color = _lerp_gradient(min(avg_level * 2, 1.0), self._gradient)
             c.coords(self._canvas_items[0], *points)
@@ -514,14 +599,20 @@ class AudioOverlay:
 
     # ── Public API ───────────────────────────────────────────────────────
 
-    def show(self, recorder: "AudioRecorder") -> None:
+    def show(self, recorder: AudioRecorder) -> None:
         """Show the overlay and start visualizing audio."""
         self._recorder = recorder
+        self._processing = False
         self._bar_heights = [0.0] * BAR_COUNT
         self._dot_peaks = [0.0] * BAR_COUNT
         self._dot_velocities = [0.0] * BAR_COUNT
         if self._root:
-            self._root.after(0, self._do_show)
+            self._root.after(0, self._rebuild_and_show)
+
+    def _rebuild_and_show(self) -> None:
+        """Rebuild the active mode on the Tk thread and reveal it."""
+        self._rebuild_canvas()
+        self._do_show()
 
     def _do_show(self) -> None:
         if self._root:
@@ -529,14 +620,16 @@ class AudioOverlay:
             self._visible = True
 
     def show_processing(self) -> None:
-        """Switch overlay to processing state (bars decay)."""
+        """Replace the recording visualizer with a blue loading spinner."""
         self._recorder = None
+        self._processing = True
         if self._root:
-            self._root.after(0, self._do_show)
+            self._root.after(0, self._rebuild_and_show)
 
     def hide(self) -> None:
         """Hide the overlay."""
         self._recorder = None
+        self._processing = False
         if self._root:
             self._root.after(0, self._do_hide)
 
@@ -549,7 +642,5 @@ class AudioOverlay:
         """Stop the overlay and destroy the window."""
         self._running = False
         if self._root:
-            try:
+            with contextlib.suppress(Exception):
                 self._root.after(0, self._root.destroy)
-            except Exception:  # noqa: BLE001
-                pass
