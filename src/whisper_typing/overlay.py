@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import logging
 import math
 import threading
 import tkinter as tk
@@ -17,13 +18,20 @@ if TYPE_CHECKING:
 BAR_COUNT = 32
 BOTTOM_MARGIN = 60
 TRANSPARENT_COLOR = "#010101"
-PROCESSING_SIZE = 72
-PROCESSING_BLUE = "#278cff"
-PROCESSING_HIGHLIGHT = "#a8d8ff"
-PROCESSING_TRACK = "#12355f"
-PROCESSING_GLOW = "#071c3d"
-PROCESSING_ITEM_COUNT = 5
+PROCESSING_SIZE = 86
+PROCESSING_BLUE = "#168bff"
+PROCESSING_CYAN = "#38bdf8"
+PROCESSING_HIGHLIGHT = "#bce4ff"
+PROCESSING_TRACK = "#17416f"
+PROCESSING_GLOW = "#0a3974"
+PROCESSING_SURFACE = "#06182d"
+PROCESSING_ITEM_COUNT = 7
 MIN_DRAW_POINTS = 4
+MIN_FFT_SAMPLES = 256
+MAX_FFT_SAMPLES = 4096
+MIN_SPECTRUM_PEAK = 1e-12
+MODE_RECORDING = "recording"
+MODE_PROCESSING = "processing"
 
 # Available visualizer styles
 STYLES = [
@@ -132,6 +140,8 @@ class AudioOverlay:
         self._extra_items: list[Any] = []
         self._frame_count: int = 0
         self._processing: bool = False
+        self._pending_mode: str | None = None
+        self._last_render_error: str | None = None
         # For dots style — peak trackers
         self._dot_peaks: list[float] = [0.0] * BAR_COUNT
         self._dot_velocities: list[float] = [0.0] * BAR_COUNT
@@ -185,8 +195,12 @@ class AudioOverlay:
 
         self._rebuild_canvas()
 
-        self._root.withdraw()
-        self._visible = False
+        pending = self._pending_mode
+        if pending is None:
+            self._root.withdraw()
+            self._visible = False
+        else:
+            self._switch_mode(pending)
         self._update_loop()
         self._root.mainloop()
 
@@ -239,18 +253,34 @@ class AudioOverlay:
     def _update_loop(self) -> None:
         if not self._running or not self._root:
             return
-        if self._visible:
-            if self._processing:
-                self._draw_processing()
-            elif self._recorder:
-                self._sample_audio()
-                self._draw()
-            else:
-                for i in range(BAR_COUNT):
-                    self._bar_heights[i] *= 0.85
-                self._draw()
-            self._frame_count += 1
-        self._root.after(33, self._update_loop)
+        try:
+            if self._visible:
+                if self._processing:
+                    self._draw_processing()
+                elif self._recorder:
+                    self._sample_audio()
+                    self._draw()
+                else:
+                    for i in range(BAR_COUNT):
+                        self._bar_heights[i] *= 0.85
+                    self._draw()
+                self._frame_count += 1
+            self._last_render_error = None
+        except Exception as exc:
+            # A Tk callback exception used to kill the only animation loop.
+            # Log a changed failure once, rebuild, and keep scheduling frames.
+            message = f"{type(exc).__name__}: {exc}"
+            if message != self._last_render_error:
+                logging.getLogger("whisper_typing").exception(
+                    "Overlay render recovered: %s",
+                    message,
+                )
+                self._last_render_error = message
+            with contextlib.suppress(Exception):
+                self._rebuild_canvas()
+        finally:
+            if self._running and self._root:
+                self._root.after(33, self._update_loop)
 
     def _init_processing(self) -> None:
         """Create a compact blue spinner for speech-to-text processing."""
@@ -258,25 +288,58 @@ class AudioOverlay:
         if not c:
             return
         cx, cy = self._win_w / 2, self._win_h / 2
-        radius = 22
-        bounds = (cx - radius, cy - radius, cx + radius, cy + radius)
-        glow = c.create_oval(*bounds, outline=PROCESSING_GLOW, width=9)
-        track = c.create_oval(*bounds, outline=PROCESSING_TRACK, width=5)
+        surface_radius = 35
+        ring_radius = 25
+        inner_radius = 13
+        surface_bounds = (
+            cx - surface_radius,
+            cy - surface_radius,
+            cx + surface_radius,
+            cy + surface_radius,
+        )
+        ring_bounds = (
+            cx - ring_radius,
+            cy - ring_radius,
+            cx + ring_radius,
+            cy + ring_radius,
+        )
+        inner_bounds = (
+            cx - inner_radius,
+            cy - inner_radius,
+            cx + inner_radius,
+            cy + inner_radius,
+        )
+        surface = c.create_oval(
+            *surface_bounds,
+            fill=PROCESSING_SURFACE,
+            outline="#0c2a50",
+            width=2,
+        )
+        glow = c.create_oval(*ring_bounds, outline=PROCESSING_GLOW, width=10)
+        track = c.create_oval(*ring_bounds, outline=PROCESSING_TRACK, width=5)
         arc = c.create_arc(
-            *bounds,
+            *ring_bounds,
             start=0,
-            extent=105,
+            extent=112,
             style=tk.ARC,
             outline=PROCESSING_BLUE,
-            width=5,
+            width=6,
         )
         highlight = c.create_arc(
-            *bounds,
-            start=72,
-            extent=30,
+            *ring_bounds,
+            start=78,
+            extent=28,
             style=tk.ARC,
             outline=PROCESSING_HIGHLIGHT,
             width=2,
+        )
+        inner_arc = c.create_arc(
+            *inner_bounds,
+            start=180,
+            extent=95,
+            style=tk.ARC,
+            outline=PROCESSING_CYAN,
+            width=3,
         )
         center = c.create_oval(
             cx - 3,
@@ -286,21 +349,32 @@ class AudioOverlay:
             fill=PROCESSING_BLUE,
             outline="",
         )
-        self._canvas_items = [glow, track, arc, highlight, center]
+        self._canvas_items = [
+            surface,
+            glow,
+            track,
+            arc,
+            highlight,
+            inner_arc,
+            center,
+        ]
 
     def _draw_processing(self) -> None:
         """Rotate and pulse the blue processing spinner."""
         c = self._canvas
         if not c or len(self._canvas_items) < PROCESSING_ITEM_COUNT:
             return
-        phase = (self._frame_count * 11) % 360
+        phase = (self._frame_count * 9) % 360
         pulse = 0.5 + 0.5 * math.sin(self._frame_count * 0.16)
-        glow, _track, arc, highlight, center = self._canvas_items
-        c.itemconfig(glow, outline=_dim_color(PROCESSING_BLUE, 0.12 + pulse * 0.08))
+        _surface, glow, _track, arc, highlight, inner_arc, center = (
+            self._canvas_items
+        )
+        c.itemconfig(glow, outline=_dim_color(PROCESSING_BLUE, 0.2 + pulse * 0.16))
         c.itemconfig(arc, start=phase)
-        c.itemconfig(highlight, start=(phase + 72) % 360)
+        c.itemconfig(highlight, start=(phase + 81) % 360)
+        c.itemconfig(inner_arc, start=(205 - phase * 0.72) % 360)
         cx, cy = self._win_w / 2, self._win_h / 2
-        dot_radius = 2.5 + pulse * 1.5
+        dot_radius = 2.5 + pulse * 2.0
         c.coords(
             center,
             cx - dot_radius,
@@ -315,18 +389,49 @@ class AudioOverlay:
             return
         audio = self._recorder.get_recent_data(max_samples=4800)
         if audio is not None and len(audio) > 0:
-            chunk = audio
-            segments = np.array_split(chunk, BAR_COUNT)
-            for i, seg in enumerate(segments):
-                rms = float(np.sqrt(np.mean(seg**2)))
-                level = min(rms * 5.0, 1.0)
+            levels = self._spectrum_levels(audio, self._recorder.sample_rate)
+            for i, level in enumerate(levels):
                 if level > self._bar_heights[i]:
-                    self._bar_heights[i] = self._bar_heights[i] * 0.2 + level * 0.8
+                    self._bar_heights[i] = self._bar_heights[i] * 0.18 + level * 0.82
                 else:
-                    self._bar_heights[i] = self._bar_heights[i] * 0.6 + level * 0.4
+                    self._bar_heights[i] = self._bar_heights[i] * 0.76 + level * 0.24
         else:
             for i in range(BAR_COUNT):
                 self._bar_heights[i] *= 0.85
+
+    @staticmethod
+    def _spectrum_levels(audio: np.ndarray, sample_rate: int) -> list[float]:
+        """Convert recent microphone audio into responsive frequency bars."""
+        sample_count = min(len(audio), MAX_FFT_SAMPLES)
+        if sample_count < MIN_FFT_SAMPLES:
+            return [0.0] * BAR_COUNT
+
+        samples = np.asarray(audio[-sample_count:], dtype=np.float64)
+        samples -= float(np.mean(samples))
+        rms = float(np.sqrt(np.mean(samples**2)))
+        dbfs = 20.0 * math.log10(rms + 1e-9)
+        overall = float(np.clip((dbfs + 55.0) / 30.0, 0.0, 1.0))
+        if overall <= 0:
+            return [0.0] * BAR_COUNT
+
+        spectrum = np.abs(np.fft.rfft(samples * np.hanning(sample_count)))
+        frequencies = np.fft.rfftfreq(sample_count, d=1.0 / sample_rate)
+        max_frequency = min(sample_rate / 2 * 0.95, 7600.0)
+        edges = np.geomspace(70.0, max_frequency, BAR_COUNT + 1)
+        energies = np.zeros(BAR_COUNT, dtype=np.float64)
+        for index in range(BAR_COUNT):
+            mask = (frequencies >= edges[index]) & (
+                frequencies < edges[index + 1]
+            )
+            if np.any(mask):
+                energies[index] = float(np.sqrt(np.mean(spectrum[mask] ** 2)))
+
+        peak = float(np.max(energies))
+        if peak <= MIN_SPECTRUM_PEAK:
+            return [0.0] * BAR_COUNT
+        shape = np.sqrt(np.clip(energies / peak, 0.0, 1.0))
+        levels = overall * (0.18 + 0.82 * shape)
+        return [float(level) for level in levels]
 
     def _draw(self) -> None:
         """Dispatch to style-specific draw method."""
@@ -602,15 +707,17 @@ class AudioOverlay:
     def show(self, recorder: AudioRecorder) -> None:
         """Show the overlay and start visualizing audio."""
         self._recorder = recorder
-        self._processing = False
+        self._pending_mode = MODE_RECORDING
         self._bar_heights = [0.0] * BAR_COUNT
         self._dot_peaks = [0.0] * BAR_COUNT
         self._dot_velocities = [0.0] * BAR_COUNT
         if self._root:
-            self._root.after(0, self._rebuild_and_show)
+            self._root.after(0, self._switch_mode, MODE_RECORDING)
 
-    def _rebuild_and_show(self) -> None:
-        """Rebuild the active mode on the Tk thread and reveal it."""
+    def _switch_mode(self, mode: str) -> None:
+        """Atomically switch canvas and mode inside the Tk event thread."""
+        self._processing = mode == MODE_PROCESSING
+        self._pending_mode = mode
         self._rebuild_canvas()
         self._do_show()
 
@@ -622,14 +729,14 @@ class AudioOverlay:
     def show_processing(self) -> None:
         """Replace the recording visualizer with a blue loading spinner."""
         self._recorder = None
-        self._processing = True
+        self._pending_mode = MODE_PROCESSING
         if self._root:
-            self._root.after(0, self._rebuild_and_show)
+            self._root.after(0, self._switch_mode, MODE_PROCESSING)
 
     def hide(self) -> None:
         """Hide the overlay."""
         self._recorder = None
-        self._processing = False
+        self._pending_mode = None
         if self._root:
             self._root.after(0, self._do_hide)
 
