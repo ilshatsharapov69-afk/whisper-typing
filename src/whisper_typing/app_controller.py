@@ -15,6 +15,7 @@ from pynput import keyboard
 
 from whisper_typing.ai_improver import AIImprover
 from whisper_typing.audio_capture import AudioRecorder
+from whisper_typing.browser_media_bridge import BrowserMediaBridge
 from whisper_typing.diagnostics import PersistentHistory, get_logger, save_audio_backup
 from whisper_typing.overlay import AudioOverlay
 from whisper_typing.transcriber import Transcriber
@@ -102,7 +103,7 @@ def save_config(config: dict[str, Any], config_path: str = "config.json") -> Non
 
 
 class MediaController:
-    """Pause/resume media using Windows SMTC (System Media Transport Controls).
+    """Pause/resume media using Windows SMTC plus a Chromium UI fallback.
 
     Pauses EVERY playing session, not just the "current" one — with several
     media apps open (browser tabs + player) Windows often reports a session
@@ -117,7 +118,11 @@ class MediaController:
     _PLAYING_STATUS: int = 4
     _PAUSED_STATUS: int = 5
 
-    def __init__(self, logger: "Callable[[str], None] | None" = None) -> None:
+    def __init__(
+        self,
+        logger: "Callable[[str], None] | None" = None,
+        browser_bridge: BrowserMediaBridge | None = None,
+    ) -> None:
         """Create an empty, thread-safe media pause lease."""
         self._log = logger or (lambda _: None)
         # Keep the actual session objects: source_app_user_model_id is not
@@ -126,6 +131,7 @@ class MediaController:
         self._paused_sessions: list[Any] = []
         self._lock = threading.RLock()
         self._last_smtc_error: str | None = None
+        self._browser_bridge = browser_bridge
 
     def pause_if_playing(self) -> bool:
         """Pause all playing media sessions. Returns True if we paused any."""
@@ -150,11 +156,16 @@ class MediaController:
                     self._last_smtc_error = message
                 self._paused_sessions = []
 
-            paused = bool(self._paused_sessions)
+            browser_paused = 0
+            if self._browser_bridge:
+                browser_paused = self._browser_bridge.pause_playing()
+
+            paused = bool(self._paused_sessions or browser_paused)
             if paused:
                 self._log(
                     "Media paused and verified "
-                    f"(sessions={len(self._paused_sessions)})."
+                    f"(sessions={len(self._paused_sessions)}, "
+                    f"browser={browser_paused})."
                 )
             return paused
 
@@ -179,10 +190,14 @@ class MediaController:
                 )
             except Exception as exc:  # noqa: BLE001
                 self._log(f"MediaController resume error: {exc}")
-        if sessions:
+        browser_resumed, browser_leased = (0, 0)
+        if self._browser_bridge:
+            browser_resumed, browser_leased = self._browser_bridge.resume_paused()
+        if sessions or browser_leased:
             self._log(
                 "Media resumed "
-                f"(sessions={resumed}/{len(sessions)})."
+                f"(sessions={resumed}/{len(sessions)}, "
+                f"browser={browser_resumed}/{browser_leased})."
             )
 
     async def _get_sessions(self) -> list[Any]:
@@ -237,6 +252,8 @@ class MediaController:
     def stop(self) -> None:
         """Restore media if the application exits during a recording."""
         self.resume()
+        if self._browser_bridge:
+            self._browser_bridge.stop()
 
 
 class WhisperAppController:
@@ -545,7 +562,16 @@ class WhisperAppController:
 
             # Start persistent media controller for pause/resume
             if not self._media:
-                self._media = MediaController(logger=self.log)
+                browser_bridge = BrowserMediaBridge(logger=self.log)
+                self._media = MediaController(
+                    logger=self.log,
+                    browser_bridge=browser_bridge,
+                )
+                threading.Thread(
+                    target=browser_bridge.start,
+                    name="browser-media-warmup",
+                    daemon=True,
+                ).start()
 
             self.log("Components initialized.")
         except Exception as e:  # noqa: BLE001
@@ -564,9 +590,9 @@ class WhisperAppController:
         record_mode = self.config.get("record_mode", "toggle")
 
         try:
-            if record_mode == "hold":
-                # Hold-to-talk mode: use Listener for press/release detection
+            if self._needs_record_key_listener():
                 self._setup_hold_listener()
+            if record_mode == "hold":
                 self._start_global_hotkeys()
                 hotkey_name = self.config["hotkey"]
                 self.log(
@@ -576,7 +602,8 @@ class WhisperAppController:
             else:
                 self._start_global_hotkeys()
                 self.log(
-                    f"Hotkeys registered. Press {self.config['hotkey']} to record."
+                    f"Toggle mode. Press {self.config['hotkey']} to start, "
+                    "press again to stop."
                 )
             self._start_supervisor()
             self.set_status("Ready")
@@ -603,10 +630,21 @@ class WhisperAppController:
         if self.listener:
             self._stop_keyboard_listener(self.listener)
         mapping = {self.config["improve_hotkey"]: self.on_improve_text}
-        if self.config.get("record_mode", "toggle") != "hold":
-            mapping[self.config["hotkey"]] = self.on_record_toggle
+        if (
+            self.config.get("record_mode", "toggle") != "hold"
+            and self.config["hotkey"] not in {"numpad_enter", "caps_lock"}
+        ):
+            mapping[self.config["hotkey"]] = self._queue_record_toggle
         self.listener = keyboard.GlobalHotKeys(mapping)
         self.listener.start()
+
+    def _needs_record_key_listener(self) -> bool:
+        """Return whether press/release-aware handling is required."""
+        if self.config.get("record_mode", "toggle") == "hold":
+            return True
+        names = [self.config.get("hotkey")]
+        names += self.config.get("extra_hotkeys") or []
+        return any(name in {"numpad_enter", "caps_lock"} for name in names)
 
     def _start_supervisor(self) -> None:
         """Start the self-healing watchdog thread (idempotent)."""
@@ -687,7 +725,7 @@ class WhisperAppController:
         except Exception:  # noqa: BLE001, S110
             pass
         try:
-            if self.config.get("record_mode", "toggle") == "hold":
+            if self._needs_record_key_listener():
                 self._setup_hold_listener()
             self._start_global_hotkeys()
             self.log("Hotkey listeners reinstalled.")
@@ -695,10 +733,11 @@ class WhisperAppController:
             self.log(f"Self-heal failed: {e}")
 
     def _setup_hold_listener(self) -> None:
-        """Set up the keyboard listener for hold-to-talk mode.
+        """Set up a press/release-aware listener for record keys.
 
-        Supports several push-to-talk keys at once (config ``hotkey`` plus
-        ``extra_hotkeys``); recording runs while any of them is held.
+        Hold mode records while the configured key is held. Toggle mode uses
+        key-up only for debouncing, so auto-repeat cannot immediately stop a
+        recording that the first key-down just started.
 
         Two keys need low-level-hook handling and get a ``win32_event_filter``:
         - ``caps_lock`` is suppressed system-wide so it can never flip the OS
@@ -725,21 +764,22 @@ class WhisperAppController:
         self._hold_caps = False
         self._hold_numpad_enter = False
         self._pressed_hold_keys = set()
+        hold_mode = self.config.get("record_mode", "toggle") == "hold"
         for name in names:
             if name == "numpad_enter":
                 self._hold_numpad_enter = True
             elif name == "caps_lock":
                 self._hold_caps = True
-            elif name in key_map:
+            elif hold_mode and name in key_map:
                 self._hold_keys.add(key_map[name])
 
         def on_press(key: Any) -> None:  # noqa: ANN401
             if key in self._hold_keys:
-                self._press_hold_key(key)
+                self._record_key_down(key)
 
         def on_release(key: Any) -> None:  # noqa: ANN401
             if key in self._hold_keys:
-                self._release_hold_key(key)
+                self._record_key_up(key)
 
         if self._hold_caps:
             # One-time: clear CapsLock now, before the hook starts
@@ -774,9 +814,9 @@ class WhisperAppController:
                     and not (data.flags & llkhf_injected)
                 ):
                     if msg in (wm_keydown, wm_syskeydown):
-                        self._press_hold_key("numpad_enter")
+                        self._record_key_down("numpad_enter")
                     elif msg in (wm_keyup, wm_syskeyup):
-                        self._release_hold_key("numpad_enter")
+                        self._record_key_up("numpad_enter")
                     suppress = True
                 # CapsLock: swallow system-wide so it can't flip the OS lock,
                 # and drive PTT directly in this filter. Using pynput's public
@@ -786,9 +826,9 @@ class WhisperAppController:
                 elif self._hold_caps and vk == vk_capital:
                     if not (data.flags & llkhf_injected):
                         if msg in (wm_keydown, wm_syskeydown):
-                            self._press_hold_key("caps_lock")
+                            self._record_key_down("caps_lock")
                         elif msg in (wm_keyup, wm_syskeyup):
-                            self._release_hold_key("caps_lock")
+                            self._record_key_up("caps_lock")
                     suppress = True
             except Exception:  # noqa: BLE001
                 return True
@@ -805,6 +845,36 @@ class WhisperAppController:
             win32_event_filter=win32_event_filter,
         )
         self._hold_listener.start()
+
+    def _record_key_down(self, ident: Any) -> None:  # noqa: ANN401
+        """Handle a physical record-key down in hold or toggle mode."""
+        if self.config.get("record_mode", "toggle") == "hold":
+            self._press_hold_key(ident)
+            return
+        if ident in self._pressed_hold_keys:
+            return
+        self._pressed_hold_keys.add(ident)
+        self._queue_record_toggle()
+
+    def _record_key_up(self, ident: Any) -> None:  # noqa: ANN401
+        """Release a toggle debounce lease, or stop a hold-mode take."""
+        if self.config.get("record_mode", "toggle") == "hold":
+            self._release_hold_key(ident)
+        else:
+            self._pressed_hold_keys.discard(ident)
+
+    def _queue_record_toggle(self) -> None:
+        """Run a toggle outside the keyboard hook and serialize rapid presses."""
+        threading.Thread(
+            target=self._do_record_toggle,
+            name="record-toggle",
+            daemon=True,
+        ).start()
+
+    def _do_record_toggle(self) -> None:
+        """Serialize toggle starts/stops against microphone recovery work."""
+        with self._ptt_lock:
+            self.on_record_toggle()
 
     def _press_hold_key(self, ident: Any) -> None:  # noqa: ANN401
         """Register a PTT key going down; start recording on the first one."""
@@ -993,16 +1063,16 @@ class WhisperAppController:
         if self.paused:
             return
 
-        if self.is_processing:
-            # Auto-reset if processing has been stuck for over 60 seconds
-            if time.time() - self._processing_start_time > 60:
-                self.log("Processing timeout — resetting stuck state.")
-                with self._processing_lock:
-                    self._processing_jobs = 0
-                    self.is_processing = False
-            else:
-                self.log("Busy processing, ignoring record toggle.")
-                return
+        if (
+            self.is_processing
+            and time.time() - self._processing_start_time > 60  # noqa: PLR2004
+        ):
+            # Transcription has its own serialization. Do not swallow a new
+            # recording press merely because the previous take is processing.
+            self.log("Processing timeout — resetting stuck state.")
+            with self._processing_lock:
+                self._processing_jobs = 0
+                self.is_processing = False
 
         if not self.recorder:
             self.log("Recorder not initialized.")
@@ -1013,7 +1083,10 @@ class WhisperAppController:
             if self._media:
                 self._media.resume()
             self._we_paused_media = False
-            self._stop_recording()
+            if self.config.get("auto_type", False):
+                self._stop_recording_and_type()
+            else:
+                self._stop_recording()
         else:
             self._we_paused_media = False
             self._ptt_gen += 1

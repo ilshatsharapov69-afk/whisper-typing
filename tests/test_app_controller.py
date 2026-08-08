@@ -1,6 +1,7 @@
 """Tests for app_controller module."""
 
 import threading
+import time
 from collections.abc import Generator
 from pathlib import Path
 from typing import Any
@@ -26,6 +27,7 @@ def mock_dependencies() -> Generator[dict[str, Any]]:
         patch("whisper_typing.app_controller.WindowManager") as mock_window_manager,
         patch("whisper_typing.app_controller.AudioOverlay") as mock_overlay,
         patch("whisper_typing.app_controller.MediaController") as mock_media,
+        patch("whisper_typing.app_controller.BrowserMediaBridge"),
         patch("pynput.keyboard.GlobalHotKeys") as mock_hotkeys,
         patch("whisper_typing.app_controller.sd") as mock_sd,
     ):
@@ -106,11 +108,15 @@ def test_legacy_f9_config_cannot_restore_manual_typing_hotkey(
 def test_numpad_enter_is_consumed_by_the_windows_hook() -> None:
     """Test that the PTT key cannot activate a focused PiP control."""
     controller = WhisperAppController()
-    controller.config = {"hotkey": "numpad_enter", "extra_hotkeys": []}
+    controller.config = {
+        "hotkey": "numpad_enter",
+        "extra_hotkeys": [],
+        "record_mode": "hold",
+    }
 
     with (
         patch("whisper_typing.app_controller.keyboard.Listener") as listener_cls,
-        patch.object(controller, "_press_hold_key") as press_hold_key,
+        patch.object(controller, "_record_key_down") as record_key_down,
     ):
         controller._setup_hold_listener()  # noqa: SLF001
         listener = listener_cls.return_value
@@ -119,18 +125,22 @@ def test_numpad_enter_is_consumed_by_the_windows_hook() -> None:
 
         assert event_filter(0x0100, key_data) is False
 
-    press_hold_key.assert_called_once_with("numpad_enter")
+    record_key_down.assert_called_once_with("numpad_enter")
     listener.suppress_event.assert_called_once_with()
 
 
 def test_main_enter_is_not_consumed_by_the_numpad_hook() -> None:
     """Test that the ordinary Enter key remains unaffected."""
     controller = WhisperAppController()
-    controller.config = {"hotkey": "numpad_enter", "extra_hotkeys": []}
+    controller.config = {
+        "hotkey": "numpad_enter",
+        "extra_hotkeys": [],
+        "record_mode": "hold",
+    }
 
     with (
         patch("whisper_typing.app_controller.keyboard.Listener") as listener_cls,
-        patch.object(controller, "_press_hold_key") as press_hold_key,
+        patch.object(controller, "_record_key_down") as record_key_down,
     ):
         controller._setup_hold_listener()  # noqa: SLF001
         listener = listener_cls.return_value
@@ -139,8 +149,48 @@ def test_main_enter_is_not_consumed_by_the_numpad_hook() -> None:
 
         assert event_filter(0x0100, key_data) is True
 
-    press_hold_key.assert_not_called()
+    record_key_down.assert_not_called()
     listener.suppress_event.assert_not_called()
+
+
+def test_toggle_numpad_enter_debounces_repeat_until_key_up() -> None:
+    """Test first physical press starts and the next physical press stops."""
+    controller = WhisperAppController()
+    controller.config = {
+        "hotkey": "numpad_enter",
+        "extra_hotkeys": [],
+        "record_mode": "toggle",
+    }
+
+    with patch.object(controller, "_queue_record_toggle") as queue_toggle:
+        controller._record_key_down("numpad_enter")  # noqa: SLF001
+        controller._record_key_down("numpad_enter")  # noqa: SLF001  # auto-repeat
+        controller._record_key_up("numpad_enter")  # noqa: SLF001
+        controller._record_key_down("numpad_enter")  # noqa: SLF001
+
+    expected_physical_presses = 2
+    assert queue_toggle.call_count == expected_physical_presses
+
+
+def test_toggle_numpad_enter_is_not_registered_as_a_generic_hotkey(
+    mock_dependencies: dict[str, Any],
+) -> None:
+    """Test numpad Enter stays distinguishable from the ordinary Enter key."""
+    controller = WhisperAppController()
+    controller.config = DEFAULT_CONFIG | {
+        "gemini_api_key": "fake",
+        "hotkey": "numpad_enter",
+        "record_mode": "toggle",
+    }
+    controller.initialize_components()
+
+    with patch("whisper_typing.app_controller.keyboard.Listener") as listener_cls:
+        controller.start_listener()
+
+    args, _ = mock_dependencies["hotkeys"].call_args
+    assert "numpad_enter" not in args[0]
+    listener_cls.assert_called_once()
+    controller.stop()
 
 
 def test_on_record_toggle_start(mock_dependencies: dict[str, Any]) -> None:  # noqa: ARG001
@@ -183,6 +233,42 @@ def test_on_record_toggle_stop(mock_dependencies: dict[str, Any]) -> None:  # no
 
     mock_recorder.stop.assert_called_once()
     assert controller.stop_live_transcribe.is_set()
+
+
+def test_toggle_stop_keeps_auto_type_behavior(
+    mock_dependencies: dict[str, Any],  # noqa: ARG001
+) -> None:
+    """Test toggle mode uses the same transcribe-and-type path as hold mode."""
+    controller = WhisperAppController()
+    controller.config = DEFAULT_CONFIG | {
+        "gemini_api_key": "fake",
+        "auto_type": True,
+    }
+    controller.initialize_components()
+    assert controller.recorder is not None
+    controller.recorder.recording = True
+
+    with patch.object(controller, "_stop_recording_and_type") as stop_and_type:
+        controller.on_record_toggle()
+
+    stop_and_type.assert_called_once_with()
+
+
+def test_toggle_start_is_not_swallowed_while_previous_take_processes(
+    mock_dependencies: dict[str, Any],  # noqa: ARG001
+) -> None:
+    """Test a new recording may start while prior transcription finishes."""
+    controller = WhisperAppController()
+    controller.config = DEFAULT_CONFIG | {"gemini_api_key": "fake"}
+    controller.initialize_components()
+    assert controller.recorder is not None
+    controller.recorder.recording = False
+    controller.is_processing = True
+    controller._processing_start_time = time.time()  # noqa: SLF001
+
+    controller.on_record_toggle()
+
+    controller.recorder.start.assert_called_once_with()
 
 
 def test_on_improve_text(mock_dependencies: dict[str, Any]) -> None:  # noqa: ARG001

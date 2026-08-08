@@ -94,3 +94,32 @@ def test_resume_never_restarts_a_session_that_is_no_longer_paused() -> None:
 
     assert resumed == 0
     session.try_play_async.assert_not_awaited()
+
+
+def test_browser_fallback_pauses_and_resumes_an_exact_verified_lease() -> None:
+    """Test Chromium fallback participates when Windows exposes no session."""
+    bridge = MagicMock()
+    bridge.pause_playing.return_value = 1
+    bridge.resume_paused.return_value = (1, 1)
+    controller = MediaController(browser_bridge=bridge)
+    controller._async_pause_all = AsyncMock(return_value=[])  # type: ignore[method-assign]  # noqa: SLF001
+
+    assert controller.pause_if_playing() is True
+    controller.resume()
+
+    bridge.pause_playing.assert_called_once_with()
+    bridge.resume_paused.assert_called_once_with()
+
+
+def test_browser_fallback_never_creates_a_lease_for_prepaused_media() -> None:
+    """Test a browser video already showing Play stays paused on resume."""
+    bridge = MagicMock()
+    bridge.pause_playing.return_value = 0
+    bridge.resume_paused.return_value = (0, 0)
+    controller = MediaController(browser_bridge=bridge)
+    controller._async_pause_all = AsyncMock(return_value=[])  # type: ignore[method-assign]  # noqa: SLF001
+
+    assert controller.pause_if_playing() is False
+    controller.resume()
+
+    bridge.resume_paused.assert_called_once_with()

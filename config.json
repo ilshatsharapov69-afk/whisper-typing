@@ -17,6 +17,6 @@
     "visualizer_style": "bars",
     "visualizer_gradient": "cyan_purple",
     "format_prompt": "You receive raw speech-to-text output. The speaker may switch between Russian and English freely, even mid-sentence. Your ONLY job:\n1. Remove filler words (uh, um, ну, типа, как бы, вот, это самое, короче, э)\n2. Remove accidental word repetitions (stutters)\n3. Fix punctuation and capitalization\nDO NOT rephrase, summarize, shorten, or change the meaning. Keep every meaningful word exactly as spoken. Output ONLY the cleaned text, nothing else.",
-    "record_mode": "hold",
+    "record_mode": "toggle",
     "auto_type": true
 }
