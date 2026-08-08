@@ -10,6 +10,7 @@ import tkinter as tk
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
+from PIL import Image, ImageDraw, ImageFilter, ImageTk
 
 if TYPE_CHECKING:
     from whisper_typing.audio_capture import AudioRecorder
@@ -18,20 +19,179 @@ if TYPE_CHECKING:
 BAR_COUNT = 32
 BOTTOM_MARGIN = 60
 TRANSPARENT_COLOR = "#010101"
-PROCESSING_SIZE = 86
-PROCESSING_BLUE = "#168bff"
-PROCESSING_CYAN = "#38bdf8"
-PROCESSING_HIGHLIGHT = "#bce4ff"
-PROCESSING_TRACK = "#17416f"
-PROCESSING_GLOW = "#0a3974"
-PROCESSING_SURFACE = "#06182d"
-PROCESSING_ITEM_COUNT = 7
+PROCESSING_SIZE = 96
+PROCESSING_ITEM_COUNT = 1
+PROCESSING_FRAME_COUNT = 60
+PROCESSING_FRAME_MS = 16
+PROCESSING_RENDER_SCALE = 3
 MIN_DRAW_POINTS = 4
 MIN_FFT_SAMPLES = 256
 MAX_FFT_SAMPLES = 4096
 MIN_SPECTRUM_PEAK = 1e-12
 MODE_RECORDING = "recording"
 MODE_PROCESSING = "processing"
+
+
+def _mix_rgb(
+    start: tuple[int, int, int],
+    end: tuple[int, int, int],
+    ratio: float,
+) -> tuple[int, int, int]:
+    """Blend two RGB colors."""
+    return tuple(
+        round(first + (second - first) * ratio)
+        for first, second in zip(start, end, strict=True)
+    )
+
+
+def _processing_pil_frames() -> list[Image.Image]:  # noqa: PLR0915
+    """Render a smooth anti-aliased blue spinner frame set."""
+    scale = PROCESSING_RENDER_SCALE
+    size = PROCESSING_SIZE * scale
+    center = size / 2
+    surface_radius = 40 * scale
+    ring_radius = 27 * scale
+    inner_radius = 13 * scale
+    ring_width = 6 * scale
+    ring_bounds = (
+        center - ring_radius,
+        center - ring_radius,
+        center + ring_radius,
+        center + ring_radius,
+    )
+    inner_bounds = (
+        center - inner_radius,
+        center - inner_radius,
+        center + inner_radius,
+        center + inner_radius,
+    )
+
+    # The expensive shadows and glow are built once. Rotating that finished
+    # layer is much faster than blurring every individual animation frame.
+    base = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+    shadow = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+    shadow_draw = ImageDraw.Draw(shadow)
+    shadow_draw.ellipse(
+        (
+            center - surface_radius,
+            center - surface_radius + 2 * scale,
+            center + surface_radius,
+            center + surface_radius + 2 * scale,
+        ),
+        fill=(0, 5, 16, 185),
+    )
+    base.alpha_composite(shadow.filter(ImageFilter.GaussianBlur(5 * scale)))
+    base_draw = ImageDraw.Draw(base)
+    base_draw.ellipse(
+        (
+            center - surface_radius,
+            center - surface_radius,
+            center + surface_radius,
+            center + surface_radius,
+        ),
+        fill=(4, 18, 38, 244),
+        outline=(15, 55, 100, 230),
+        width=2 * scale,
+    )
+    base_draw.arc(
+        ring_bounds,
+        start=0,
+        end=360,
+        fill=(21, 59, 101, 210),
+        width=ring_width,
+    )
+
+    trail = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+    crisp = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+    trail_draw = ImageDraw.Draw(trail)
+    crisp_draw = ImageDraw.Draw(crisp)
+    segment_count = 32
+    tail_span = 224.0
+    segment_step = tail_span / segment_count
+    head_phase = -90.0
+    for segment in range(segment_count):
+        ratio = (segment + 1) / segment_count
+        angle = head_phase - tail_span + segment * segment_step
+        end = angle + segment_step * 0.78
+        color = _mix_rgb((14, 74, 172), (92, 204, 255), ratio)
+        trail_draw.arc(
+            ring_bounds,
+            start=angle,
+            end=end,
+            fill=(*color, round(25 + 225 * ratio**1.65)),
+            width=ring_width + 3 * scale,
+        )
+        crisp_draw.arc(
+            ring_bounds,
+            start=angle,
+            end=end,
+            fill=(*color, round(35 + 220 * ratio**1.5)),
+            width=ring_width,
+        )
+    trail = trail.filter(ImageFilter.GaussianBlur(4 * scale))
+    trail.alpha_composite(crisp)
+    head_x = center + ring_radius * math.cos(math.radians(head_phase))
+    head_y = center + ring_radius * math.sin(math.radians(head_phase))
+    head_radius = ring_width * 0.58
+    trail_draw = ImageDraw.Draw(trail)
+    trail_draw.ellipse(
+        (
+            head_x - head_radius,
+            head_y - head_radius,
+            head_x + head_radius,
+            head_y + head_radius,
+        ),
+        fill=(190, 232, 255, 255),
+    )
+
+    frames: list[Image.Image] = []
+    for frame_index in range(PROCESSING_FRAME_COUNT):
+        rotation = frame_index * 360.0 / PROCESSING_FRAME_COUNT
+        pulse = 0.5 + 0.5 * math.sin(frame_index * math.tau / PROCESSING_FRAME_COUNT)
+        image = base.copy()
+        rotated = trail.rotate(
+            -rotation,
+            resample=Image.Resampling.BICUBIC,
+            center=(center, center),
+        )
+        image.alpha_composite(rotated)
+        draw = ImageDraw.Draw(image)
+        inner_phase = 205.0 + rotation * 0.68
+        draw.arc(
+            inner_bounds,
+            start=inner_phase,
+            end=inner_phase + 92,
+            fill=(56, 189, 248, 225),
+            width=3 * scale,
+        )
+        dot_radius = (3.0 + pulse * 1.8) * scale
+        draw.ellipse(
+            (
+                center - dot_radius,
+                center - dot_radius,
+                center + dot_radius,
+                center + dot_radius,
+            ),
+            fill=(86, 199, 255, 255),
+        )
+        pinpoint = 1.2 * scale
+        draw.ellipse(
+            (
+                center - pinpoint,
+                center - pinpoint,
+                center + pinpoint,
+                center + pinpoint,
+            ),
+            fill=(225, 247, 255, 255),
+        )
+        frames.append(
+            image.resize(
+                (PROCESSING_SIZE, PROCESSING_SIZE),
+                Image.Resampling.LANCZOS,
+            )
+        )
+
+    return frames
 
 # Available visualizer styles
 STYLES = [
@@ -142,6 +302,7 @@ class AudioOverlay:
         self._processing: bool = False
         self._pending_mode: str | None = None
         self._last_render_error: str | None = None
+        self._processing_frames: list[ImageTk.PhotoImage] = []
         # For dots style — peak trackers
         self._dot_peaks: list[float] = [0.0] * BAR_COUNT
         self._dot_velocities: list[float] = [0.0] * BAR_COUNT
@@ -193,6 +354,7 @@ class AudioOverlay:
         self._root.configure(bg=TRANSPARENT_COLOR)
         self._root.attributes("-transparentcolor", TRANSPARENT_COLOR)
 
+        self._prepare_processing_frames()
         self._rebuild_canvas()
 
         pending = self._pending_mode
@@ -280,107 +442,48 @@ class AudioOverlay:
                 self._rebuild_canvas()
         finally:
             if self._running and self._root:
-                self._root.after(33, self._update_loop)
+                frame_ms = PROCESSING_FRAME_MS if self._processing else 33
+                self._root.after(frame_ms, self._update_loop)
+
+    def _prepare_processing_frames(self) -> None:
+        """Create Tk images once so showing the spinner is instantaneous."""
+        if self._processing_frames or not self._root:
+            return
+        self._processing_frames = [
+            ImageTk.PhotoImage(frame, master=self._root)
+            for frame in _processing_pil_frames()
+        ]
 
     def _init_processing(self) -> None:
-        """Create a compact blue spinner for speech-to-text processing."""
+        """Create the anti-aliased processing animation canvas item."""
         c = self._canvas
         if not c:
             return
-        cx, cy = self._win_w / 2, self._win_h / 2
-        surface_radius = 35
-        ring_radius = 25
-        inner_radius = 13
-        surface_bounds = (
-            cx - surface_radius,
-            cy - surface_radius,
-            cx + surface_radius,
-            cy + surface_radius,
+        self._prepare_processing_frames()
+        if not self._processing_frames:
+            return
+        spinner = c.create_image(
+            self._win_w / 2,
+            self._win_h / 2,
+            image=self._processing_frames[0],
         )
-        ring_bounds = (
-            cx - ring_radius,
-            cy - ring_radius,
-            cx + ring_radius,
-            cy + ring_radius,
-        )
-        inner_bounds = (
-            cx - inner_radius,
-            cy - inner_radius,
-            cx + inner_radius,
-            cy + inner_radius,
-        )
-        surface = c.create_oval(
-            *surface_bounds,
-            fill=PROCESSING_SURFACE,
-            outline="#0c2a50",
-            width=2,
-        )
-        glow = c.create_oval(*ring_bounds, outline=PROCESSING_GLOW, width=10)
-        track = c.create_oval(*ring_bounds, outline=PROCESSING_TRACK, width=5)
-        arc = c.create_arc(
-            *ring_bounds,
-            start=0,
-            extent=112,
-            style=tk.ARC,
-            outline=PROCESSING_BLUE,
-            width=6,
-        )
-        highlight = c.create_arc(
-            *ring_bounds,
-            start=78,
-            extent=28,
-            style=tk.ARC,
-            outline=PROCESSING_HIGHLIGHT,
-            width=2,
-        )
-        inner_arc = c.create_arc(
-            *inner_bounds,
-            start=180,
-            extent=95,
-            style=tk.ARC,
-            outline=PROCESSING_CYAN,
-            width=3,
-        )
-        center = c.create_oval(
-            cx - 3,
-            cy - 3,
-            cx + 3,
-            cy + 3,
-            fill=PROCESSING_BLUE,
-            outline="",
-        )
-        self._canvas_items = [
-            surface,
-            glow,
-            track,
-            arc,
-            highlight,
-            inner_arc,
-            center,
-        ]
+        self._canvas_items = [spinner]
 
     def _draw_processing(self) -> None:
-        """Rotate and pulse the blue processing spinner."""
+        """Advance the pre-rendered blue spinner at 60 FPS."""
         c = self._canvas
-        if not c or len(self._canvas_items) < PROCESSING_ITEM_COUNT:
+        if (
+            not c
+            or len(self._canvas_items) < PROCESSING_ITEM_COUNT
+            or not self._processing_frames
+        ):
             return
-        phase = (self._frame_count * 9) % 360
-        pulse = 0.5 + 0.5 * math.sin(self._frame_count * 0.16)
-        _surface, glow, _track, arc, highlight, inner_arc, center = (
-            self._canvas_items
-        )
-        c.itemconfig(glow, outline=_dim_color(PROCESSING_BLUE, 0.2 + pulse * 0.16))
-        c.itemconfig(arc, start=phase)
-        c.itemconfig(highlight, start=(phase + 81) % 360)
-        c.itemconfig(inner_arc, start=(205 - phase * 0.72) % 360)
-        cx, cy = self._win_w / 2, self._win_h / 2
-        dot_radius = 2.5 + pulse * 2.0
-        c.coords(
-            center,
-            cx - dot_radius,
-            cy - dot_radius,
-            cx + dot_radius,
-            cy + dot_radius,
+        frame = self._processing_frames[
+            self._frame_count % len(self._processing_frames)
+        ]
+        c.itemconfig(
+            self._canvas_items[0],
+            image=frame,
         )
 
     def _sample_audio(self) -> None:
