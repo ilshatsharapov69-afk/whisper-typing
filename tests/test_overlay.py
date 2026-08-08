@@ -11,6 +11,8 @@ from whisper_typing.overlay import (
     PROCESSING_FRAME_COUNT,
     PROCESSING_FRAME_MS,
     PROCESSING_SIZE,
+    VISUALIZER_FRAME_MS,
+    VISUALIZER_SAMPLE_COUNT,
     AudioOverlay,
     _processing_pil_frames,
 )
@@ -72,14 +74,17 @@ def test_blue_spinner_uses_prerendered_frames() -> None:
 
 
 def test_processing_frames_are_antialiased_and_visibly_animated() -> None:
-    """Test high-resolution rendering produces smooth, changing RGBA frames."""
+    """Test the tiny spinner is smooth, transparent, and visibly animated."""
     frames = _processing_pil_frames()
 
     assert len(frames) == PROCESSING_FRAME_COUNT
+    assert PROCESSING_SIZE == 24  # noqa: PLR2004
     assert all(frame.size == (PROCESSING_SIZE, PROCESSING_SIZE) for frame in frames)
     alpha = np.asarray(frames[0].getchannel("A"))
     fully_opaque = 255
     assert np.any((alpha > 0) & (alpha < fully_opaque))
+    assert alpha[0, 0] == 0
+    assert alpha[PROCESSING_SIZE // 2, PROCESSING_SIZE // 2] == 0
     assert frames[0].tobytes() != frames[1].tobytes()
 
 
@@ -147,6 +152,42 @@ def test_silence_keeps_equalizer_at_rest() -> None:
     levels = AudioOverlay._spectrum_levels(audio, 16000)  # noqa: SLF001
 
     assert levels == [0.0] * 32
+
+
+def test_equalizer_uses_short_audio_window_for_responsive_motion() -> None:
+    """Test visualizer avoids a sluggish quarter-second FFT window."""
+    overlay = AudioOverlay()
+    recorder = MagicMock()
+    recorder.sample_rate = 16000
+    recorder.get_recent_data.return_value = np.ones(1024, dtype=np.float32)
+    overlay._recorder = recorder  # noqa: SLF001
+    overlay._spectrum_levels = MagicMock(return_value=[0.5] * 32)  # type: ignore[method-assign]  # noqa: SLF001
+
+    overlay._sample_audio()  # noqa: SLF001
+
+    recorder.get_recent_data.assert_called_once_with(
+        max_samples=VISUALIZER_SAMPLE_COUNT,
+    )
+    target_level = 0.5
+    assert all(
+        0.0 < level < target_level
+        for level in overlay._bar_heights  # noqa: SLF001
+    )
+
+
+def test_recording_visualizer_schedules_smooth_sixty_fps_updates() -> None:
+    """Test recording frames use the same smooth cadence as processing."""
+    overlay = AudioOverlay()
+    root = MagicMock()
+    overlay._root = root  # noqa: SLF001
+    overlay._running = True  # noqa: SLF001
+
+    overlay._update_loop()  # noqa: SLF001
+
+    root.after.assert_called_once_with(
+        VISUALIZER_FRAME_MS,
+        overlay._update_loop,  # noqa: SLF001
+    )
 
 
 def test_render_failure_rebuilds_and_keeps_animation_scheduled() -> None:

@@ -19,11 +19,15 @@ if TYPE_CHECKING:
 BAR_COUNT = 32
 BOTTOM_MARGIN = 60
 TRANSPARENT_COLOR = "#010101"
-PROCESSING_SIZE = 96
+PROCESSING_SIZE = 24
 PROCESSING_ITEM_COUNT = 1
 PROCESSING_FRAME_COUNT = 60
 PROCESSING_FRAME_MS = 16
-PROCESSING_RENDER_SCALE = 3
+PROCESSING_RENDER_SCALE = 6
+VISUALIZER_FRAME_MS = 16
+VISUALIZER_SAMPLE_COUNT = 2048
+VISUALIZER_ATTACK = 0.4
+VISUALIZER_RELEASE = 0.17
 MIN_DRAW_POINTS = 4
 MIN_FFT_SAMPLES = 256
 MAX_FFT_SAMPLES = 4096
@@ -44,95 +48,55 @@ def _mix_rgb(
     )
 
 
-def _processing_pil_frames() -> list[Image.Image]:  # noqa: PLR0915
-    """Render a smooth anti-aliased blue spinner frame set."""
+def _processing_pil_frames() -> list[Image.Image]:
+    """Render a small transparent blue spinner with a gradient tail."""
     scale = PROCESSING_RENDER_SCALE
     size = PROCESSING_SIZE * scale
     center = size / 2
-    surface_radius = 40 * scale
-    ring_radius = 27 * scale
-    inner_radius = 13 * scale
-    ring_width = 6 * scale
+    ring_radius = 7.6 * scale
+    ring_width = round(2.0 * scale)
     ring_bounds = (
         center - ring_radius,
         center - ring_radius,
         center + ring_radius,
         center + ring_radius,
     )
-    inner_bounds = (
-        center - inner_radius,
-        center - inner_radius,
-        center + inner_radius,
-        center + inner_radius,
-    )
 
-    # The expensive shadows and glow are built once. Rotating that finished
-    # layer is much faster than blurring every individual animation frame.
-    base = Image.new("RGBA", (size, size), (0, 0, 0, 0))
-    shadow = Image.new("RGBA", (size, size), (0, 0, 0, 0))
-    shadow_draw = ImageDraw.Draw(shadow)
-    shadow_draw.ellipse(
-        (
-            center - surface_radius,
-            center - surface_radius + 2 * scale,
-            center + surface_radius,
-            center + surface_radius + 2 * scale,
-        ),
-        fill=(0, 5, 16, 185),
-    )
-    base.alpha_composite(shadow.filter(ImageFilter.GaussianBlur(5 * scale)))
-    base_draw = ImageDraw.Draw(base)
-    base_draw.ellipse(
-        (
-            center - surface_radius,
-            center - surface_radius,
-            center + surface_radius,
-            center + surface_radius,
-        ),
-        fill=(4, 18, 38, 244),
-        outline=(15, 55, 100, 230),
-        width=2 * scale,
-    )
-    base_draw.arc(
-        ring_bounds,
-        start=0,
-        end=360,
-        fill=(21, 59, 101, 210),
-        width=ring_width,
-    )
-
-    trail = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+    # Build one clean tail and rotate it. There is intentionally no badge,
+    # background disc, inner arc, or centre dot: only the spinner is visible.
+    glow = Image.new("RGBA", (size, size), (0, 0, 0, 0))
     crisp = Image.new("RGBA", (size, size), (0, 0, 0, 0))
-    trail_draw = ImageDraw.Draw(trail)
+    glow_draw = ImageDraw.Draw(glow)
     crisp_draw = ImageDraw.Draw(crisp)
-    segment_count = 32
-    tail_span = 224.0
+    segment_count = 64
+    tail_span = 272.0
     segment_step = tail_span / segment_count
     head_phase = -90.0
     for segment in range(segment_count):
         ratio = (segment + 1) / segment_count
         angle = head_phase - tail_span + segment * segment_step
-        end = angle + segment_step * 0.78
-        color = _mix_rgb((14, 74, 172), (92, 204, 255), ratio)
-        trail_draw.arc(
+        end = angle + segment_step + 0.8
+        color = _mix_rgb((30, 94, 238), (119, 225, 255), ratio)
+        alpha = round(10 + 245 * ratio**2.05)
+        glow_draw.arc(
             ring_bounds,
             start=angle,
             end=end,
-            fill=(*color, round(25 + 225 * ratio**1.65)),
-            width=ring_width + 3 * scale,
+            fill=(*color, round(alpha * 0.58)),
+            width=ring_width + round(1.1 * scale),
         )
         crisp_draw.arc(
             ring_bounds,
             start=angle,
             end=end,
-            fill=(*color, round(35 + 220 * ratio**1.5)),
+            fill=(*color, alpha),
             width=ring_width,
         )
-    trail = trail.filter(ImageFilter.GaussianBlur(4 * scale))
+    trail = glow.filter(ImageFilter.GaussianBlur(1.25 * scale))
     trail.alpha_composite(crisp)
     head_x = center + ring_radius * math.cos(math.radians(head_phase))
     head_y = center + ring_radius * math.sin(math.radians(head_phase))
-    head_radius = ring_width * 0.58
+    head_radius = ring_width * 0.54
     trail_draw = ImageDraw.Draw(trail)
     trail_draw.ellipse(
         (
@@ -141,48 +105,16 @@ def _processing_pil_frames() -> list[Image.Image]:  # noqa: PLR0915
             head_x + head_radius,
             head_y + head_radius,
         ),
-        fill=(190, 232, 255, 255),
+        fill=(215, 247, 255, 255),
     )
 
     frames: list[Image.Image] = []
     for frame_index in range(PROCESSING_FRAME_COUNT):
         rotation = frame_index * 360.0 / PROCESSING_FRAME_COUNT
-        pulse = 0.5 + 0.5 * math.sin(frame_index * math.tau / PROCESSING_FRAME_COUNT)
-        image = base.copy()
-        rotated = trail.rotate(
+        image = trail.rotate(
             -rotation,
             resample=Image.Resampling.BICUBIC,
             center=(center, center),
-        )
-        image.alpha_composite(rotated)
-        draw = ImageDraw.Draw(image)
-        inner_phase = 205.0 + rotation * 0.68
-        draw.arc(
-            inner_bounds,
-            start=inner_phase,
-            end=inner_phase + 92,
-            fill=(56, 189, 248, 225),
-            width=3 * scale,
-        )
-        dot_radius = (3.0 + pulse * 1.8) * scale
-        draw.ellipse(
-            (
-                center - dot_radius,
-                center - dot_radius,
-                center + dot_radius,
-                center + dot_radius,
-            ),
-            fill=(86, 199, 255, 255),
-        )
-        pinpoint = 1.2 * scale
-        draw.ellipse(
-            (
-                center - pinpoint,
-                center - pinpoint,
-                center + pinpoint,
-                center + pinpoint,
-            ),
-            fill=(225, 247, 255, 255),
         )
         frames.append(
             image.resize(
@@ -442,7 +374,9 @@ class AudioOverlay:
                 self._rebuild_canvas()
         finally:
             if self._running and self._root:
-                frame_ms = PROCESSING_FRAME_MS if self._processing else 33
+                frame_ms = (
+                    PROCESSING_FRAME_MS if self._processing else VISUALIZER_FRAME_MS
+                )
                 self._root.after(frame_ms, self._update_loop)
 
     def _prepare_processing_frames(self) -> None:
@@ -490,14 +424,15 @@ class AudioOverlay:
         """Sample audio data into bar heights."""
         if not self._recorder:
             return
-        audio = self._recorder.get_recent_data(max_samples=4800)
+        audio = self._recorder.get_recent_data(max_samples=VISUALIZER_SAMPLE_COUNT)
         if audio is not None and len(audio) > 0:
             levels = self._spectrum_levels(audio, self._recorder.sample_rate)
             for i, level in enumerate(levels):
                 if level > self._bar_heights[i]:
-                    self._bar_heights[i] = self._bar_heights[i] * 0.18 + level * 0.82
+                    blend = VISUALIZER_ATTACK
                 else:
-                    self._bar_heights[i] = self._bar_heights[i] * 0.76 + level * 0.24
+                    blend = VISUALIZER_RELEASE
+                self._bar_heights[i] += (level - self._bar_heights[i]) * blend
         else:
             for i in range(BAR_COUNT):
                 self._bar_heights[i] *= 0.85
