@@ -11,12 +11,12 @@ A background speech-to-text application for Windows that runs locally. It listen
 - **Real-Time Transcription**: See your words appear in the preview area instantly as you speak.
 - **System Tray Icon**: Runs in the background with a color-coded tray icon (green = ready, red = recording, yellow = processing).
 - **Audio Overlay**: Floating audio level visualization while recording.
-- **Media Auto-Pause**: Pauses every Windows media session plus Chrome/Edge Picture-in-Picture when recording starts, then resumes only what the app paused.
+- **Media Auto-Pause**: Pauses every Windows media session plus Chrome/Edge Picture-in-Picture when recording starts, then resumes only what the app paused. Media the user had already paused stays paused. Verify it on real windows with `python -X utf8 tools/media_selftest.py`.
 - **Recovery History**: Right-click the tray icon and choose **History** for a searchable local report with copy buttons and playable WAV backups.
-- **Hold-to-Record**: Hold the hotkey to record, release to stop (configurable: hold or toggle mode).
+- **Toggle or Hold**: Press once to start and once to stop (`"toggle"`), or hold the key while speaking (`"hold"`).
 - **Auto-Paste**: Automatically pastes the transcribed text after recording stops.
 - **Global Hotkeys**: Control recording and optional AI improvement from any application.
-  - **Record/Stop**: `Caps Lock` or `F8` (configurable)
+  - **Record/Stop**: numpad `Enter` in the shipped config; `caps_lock` and `<f8>` also work.
   - **Improve Text**: `F10` (default) - Uses Gemini AI to fix grammar and refine text.
 - **Window Refocus**: Automatically switches back to your target window after recording stops.
 - **Safe Focus**: Keeps the text in the clipboard instead of pasting if focus changed.
@@ -65,23 +65,25 @@ On first run, a `config.json` is created with defaults. You can edit it or press
 
 ```json
 {
-  "hotkey": "caps_lock",
+  "hotkey": "numpad_enter",
   "improve_hotkey": "<f10>",
   "model": "openai/whisper-large-v3-turbo",
   "language": null,
   "device": "cuda",
-  "compute_type": "float16",
+  "compute_type": "int8_float16",
   "refocus_window": true,
-  "record_mode": "hold",
+  "record_mode": "toggle",
   "auto_type": true,
+  "pause_media": true,
   "model_cache_dir": "./models/"
 }
 ```
 
 | Setting | Description |
 |---------|-------------|
-| `hotkey` | Record trigger key (`caps_lock`, `<f8>`, etc.) |
+| `hotkey` | Record trigger key (`numpad_enter`, `caps_lock`, `<f8>`, etc.) |
 | `record_mode` | `"hold"` = hold key to record, `"toggle"` = press to start/stop |
+| `pause_media` | Pause playing media while recording and restore it afterwards |
 | `auto_type` | Automatically type text after recording stops |
 | `device` | `"cuda"` for GPU, `"cpu"` for CPU-only |
 | `model` | Whisper model (`whisper-base.en` for fast, `whisper-large-v3-turbo` for quality) |

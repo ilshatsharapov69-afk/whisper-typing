@@ -1,14 +1,19 @@
 """Tests for the recording and processing overlay states."""
 
 import math
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import numpy as np
+from PIL import Image
 
 from whisper_typing.overlay import (
     BAR_COUNT,
+    FULLY_OPAQUE,
+    MIN_FRAME_MS,
     MODE_PROCESSING,
     MODE_RECORDING,
+    PROCESSING_ASSET,
     PROCESSING_FRAME_COUNT,
     PROCESSING_FRAME_MS,
     PROCESSING_SIZE,
@@ -16,6 +21,8 @@ from whisper_typing.overlay import (
     VISUALIZER_FRAME_MS,
     VISUALIZER_SAMPLE_COUNT,
     AudioOverlay,
+    _drop_dark_background,
+    _processing_animation,
     _processing_pil_frames,
 )
 
@@ -99,8 +106,8 @@ def test_processing_frames_are_prepared_once() -> None:
 
     with (
         patch(
-            "whisper_typing.overlay._processing_pil_frames",
-            return_value=rendered,
+            "whisper_typing.overlay._processing_animation",
+            return_value=(rendered, [40, 40]),
         ) as render_frames,
         patch(
             "whisper_typing.overlay.ImageTk.PhotoImage",
@@ -112,6 +119,51 @@ def test_processing_frames_are_prepared_once() -> None:
 
     render_frames.assert_called_once_with()
     assert photo_image.call_count == len(rendered)
+
+
+def test_the_shipped_animation_is_loaded_and_fits_the_overlay() -> None:
+    """Test the packaged GIF drives the processing indicator."""
+    frames, delays = _processing_animation()
+
+    assert PROCESSING_ASSET.exists()
+    assert len(frames) > 1
+    assert len(delays) == len(frames)
+    assert all(max(frame.size) <= PROCESSING_SIZE for frame in frames)
+    assert all(delay >= MIN_FRAME_MS for delay in delays)
+
+
+def test_the_animation_plays_at_the_speed_the_gif_asks_for() -> None:
+    """Test a slow GIF is not force-run at the drawn spinner's cadence."""
+    overlay = AudioOverlay()
+    overlay._processing_delays = [80, 120]  # noqa: SLF001
+
+    overlay._frame_count = 0  # noqa: SLF001
+    first = overlay._processing_frame_ms()  # noqa: SLF001
+    overlay._frame_count = 3  # noqa: SLF001
+    second = overlay._processing_frame_ms()  # noqa: SLF001
+
+    expected_first, expected_second = 80, 120
+    assert (first, second) == (expected_first, expected_second)
+
+
+def test_an_opaque_meme_gif_loses_its_black_backdrop() -> None:
+    """Test the overlay never becomes a black tile over a light window."""
+    image = Image.new("RGBA", (4, 4), (255, 90, 90, 255))
+    image.putpixel((0, 0), (2, 2, 2, 255))
+
+    keyed = _drop_dark_background(image)
+
+    assert keyed.getpixel((0, 0))[3] == 0
+    assert keyed.getpixel((2, 2))[3] == FULLY_OPAQUE
+
+
+def test_a_missing_animation_falls_back_to_the_drawn_spinner() -> None:
+    """Test a lost asset degrades to the built-in spinner, not to nothing."""
+    with patch("whisper_typing.overlay.PROCESSING_ASSET", Path("no-such-file.gif")):
+        frames, delays = _processing_animation()
+
+    assert len(frames) == PROCESSING_FRAME_COUNT
+    assert set(delays) == {PROCESSING_FRAME_MS}
 
 
 def test_new_recording_replaces_processing_mode() -> None:

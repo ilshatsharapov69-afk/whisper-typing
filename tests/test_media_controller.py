@@ -1,7 +1,7 @@
 """Tests for exact, state-aware Windows media control."""
 
 import asyncio
-from unittest.mock import AsyncMock, MagicMock, call
+from unittest.mock import AsyncMock, MagicMock, call, patch
 
 from whisper_typing.app_controller import MediaController
 
@@ -123,3 +123,73 @@ def test_browser_fallback_never_creates_a_lease_for_prepaused_media() -> None:
     controller.resume()
 
     bridge.resume_paused.assert_called_once_with()
+
+
+def test_a_carried_lease_is_never_played_just_to_be_paused_again() -> None:
+    """Test a new take does not restart media left paused by a failed take."""
+    stranded = _session(5)
+    controller = MediaController()
+    controller._paused_sessions = [stranded]  # noqa: SLF001
+    controller._get_sessions = AsyncMock(return_value=[])  # type: ignore[method-assign]  # noqa: SLF001
+
+    assert controller.pause_if_playing() is True
+
+    stranded.try_play_async.assert_not_awaited()
+    assert controller._paused_sessions == [stranded]  # noqa: SLF001
+
+
+def test_a_carried_lease_restarted_by_the_user_is_paused_again() -> None:
+    """Test media the user resumed by hand is re-paused, not silently dropped."""
+    restarted = _session(4)
+    controller = MediaController()
+    controller._get_sessions = AsyncMock(return_value=[restarted])  # type: ignore[method-assign]  # noqa: SLF001
+    restarted.get_playback_info.side_effect = [
+        MagicMock(playback_status=4),  # carried check: playing again
+        MagicMock(playback_status=4),  # fresh scan: playing
+        MagicMock(playback_status=5),  # pause confirmed
+    ]
+
+    paused = asyncio.run(controller._async_pause_all([restarted]))  # noqa: SLF001
+
+    assert paused == [restarted]
+    restarted.try_pause_async.assert_awaited_once()
+
+
+def test_an_smtc_failure_does_not_forget_media_it_already_paused() -> None:
+    """Test a broken SMTC scan keeps the lease instead of stranding the video."""
+    stranded = _session(5)
+    controller = MediaController()
+    controller._paused_sessions = [stranded]  # noqa: SLF001
+    controller._async_pause_all = AsyncMock(  # type: ignore[method-assign]  # noqa: SLF001
+        side_effect=OSError("service unavailable")
+    )
+
+    controller.pause_if_playing()
+
+    assert controller._paused_sessions == [stranded]  # noqa: SLF001
+
+
+def test_browser_fallback_waits_for_chromium_after_an_smtc_pause() -> None:
+    """Test the fallback never reads an accessibility name SMTC just invalidated."""
+    bridge = MagicMock()
+    bridge.pause_playing.return_value = 0
+    controller = MediaController(browser_bridge=bridge)
+    controller._async_pause_all = AsyncMock(return_value=[_session(5)])  # type: ignore[method-assign]  # noqa: SLF001
+
+    with patch("whisper_typing.app_controller.time.sleep") as sleep:
+        controller.pause_if_playing()
+
+    sleep.assert_called_once_with(MediaController._BROWSER_SETTLE_S)  # noqa: SLF001
+
+
+def test_browser_fallback_is_not_delayed_when_smtc_paused_nothing() -> None:
+    """Test the settle delay is only paid when it can actually prevent a race."""
+    bridge = MagicMock()
+    bridge.pause_playing.return_value = 1
+    controller = MediaController(browser_bridge=bridge)
+    controller._async_pause_all = AsyncMock(return_value=[])  # type: ignore[method-assign]  # noqa: SLF001
+
+    with patch("whisper_typing.app_controller.time.sleep") as sleep:
+        assert controller.pause_if_playing() is True
+
+    sleep.assert_not_called()

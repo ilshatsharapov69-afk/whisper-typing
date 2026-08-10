@@ -4,6 +4,7 @@ import asyncio
 import ctypes
 import json
 import os
+import queue
 import threading
 import time
 from pathlib import Path
@@ -22,7 +23,7 @@ from whisper_typing.transcriber import Transcriber
 from whisper_typing.window_manager import WindowManager
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Sequence
 
 DEFAULT_CONFIG: dict[str, Any] = {
     "hotkey": "<f8>",
@@ -110,11 +111,21 @@ class MediaController:
     that is not the one actually audible, which made pausing look random.
     Resumes exactly the sessions whose transition to a non-playing state was
     verified. Every call is bounded by a timeout and never raises.
+
+    The two channels are deliberately sequential, not parallel: SMTC first,
+    then a settle delay, then the browser fallback for whatever is *still*
+    playing. Running them together made both act on the same YouTube video —
+    SMTC paused it and the fallback, reading a not-yet-updated accessibility
+    name, toggled it straight back into playback.
     """
 
-    _TIMEOUT_S: float = 3.0
-    _STATE_CONFIRM_ATTEMPTS: int = 5
-    _STATE_CONFIRM_DELAY_S: float = 0.05
+    _TIMEOUT_S: float = 5.0
+    # Chrome can take well over the old 250 ms window to report the paused
+    # state; an unconfirmed pause is dropped from the lease and then never
+    # resumed, which stranded the user's video.
+    _STATE_CONFIRM_ATTEMPTS: int = 15
+    _STATE_CONFIRM_DELAY_S: float = 0.06
+    _BROWSER_SETTLE_S: float = 0.35
     _PLAYING_STATUS: int = 4
     _PAUSED_STATUS: int = 5
 
@@ -136,14 +147,15 @@ class MediaController:
     def pause_if_playing(self) -> bool:
         """Pause all playing media sessions. Returns True if we paused any."""
         with self._lock:
-            # A stale state can remain after a failed/aborted take. Restore it
-            # before creating a new pause lease.
-            if self._paused_sessions:
-                self._resume_locked()
+            # A lease can survive a failed take. It is carried into the new
+            # lease instead of being resumed first: a new recording wants
+            # silence, and playing that media just to pause it again was
+            # exactly the "video starts for a second" glitch.
+            carried = self._paused_sessions
 
             try:
                 self._paused_sessions = asyncio.run(
-                    asyncio.wait_for(self._async_pause_all(), self._TIMEOUT_S)
+                    asyncio.wait_for(self._async_pause_all(carried), self._TIMEOUT_S)
                 )
                 self._last_smtc_error = None
             except Exception as exc:  # noqa: BLE001
@@ -154,10 +166,15 @@ class MediaController:
                         f"({message}); media state left unchanged."
                     )
                     self._last_smtc_error = message
-                self._paused_sessions = []
+                self._paused_sessions = carried
 
             browser_paused = 0
             if self._browser_bridge:
+                if self._paused_sessions:
+                    # Chromium's accessibility tree lags behind the pause SMTC
+                    # just delivered. Scanning immediately finds a stale
+                    # "Pause" button and clicking it restarts the video.
+                    time.sleep(self._BROWSER_SETTLE_S)
                 browser_paused = self._browser_bridge.pause_playing()
 
             paused = bool(self._paused_sessions or browser_paused)
@@ -213,9 +230,18 @@ class MediaController:
             session = manager.get_current_session()
             return [session] if session else []
 
-    async def _async_pause_all(self) -> list[Any]:
-        sessions = await self._get_sessions()
+    async def _async_pause_all(self, carried: "Sequence[Any]" = ()) -> list[Any]:
         paused: list[Any] = []
+        # Sessions an earlier take paused but never resumed are still ours to
+        # restart, as long as nothing else moved them meanwhile.
+        for session in carried:
+            try:
+                if session.get_playback_info().playback_status == self._PAUSED_STATUS:
+                    paused.append(session)
+            except Exception:  # noqa: BLE001, S112
+                continue
+
+        sessions = await self._get_sessions()
         for session in sessions:
             try:
                 info = session.get_playback_info()
@@ -318,11 +344,15 @@ class WhisperAppController:
         # previous stop to finish, otherwise recorder.start() sees
         # recording=True and silently swallows the new take.
         self._ptt_lock: threading.Lock = threading.Lock()
-        # Increments on every PTT start; a media-pause that completes after
-        # its take already ended must not mark (or leave) media paused.
+        # Increments on every PTT start AND stop; a media-pause that reaches
+        # the worker after its take already ended must not run at all.
         self._ptt_gen: int = 0
-        self._we_paused_media: bool = False
         self._media: MediaController | None = None
+        # Media pause/resume run on one dedicated thread. Firing them from
+        # ad-hoc threads let a slow pause land *after* the resume that was
+        # supposed to undo it, leaving the video stopped for good.
+        self._media_queue: queue.Queue[tuple[str, int] | None] = queue.Queue()
+        self._media_thread: threading.Thread | None = None
         # Self-healing keyboard-hook supervisor
         self._probe_seen: threading.Event = threading.Event()
         self._supervisor_stop: threading.Event = threading.Event()
@@ -568,11 +598,15 @@ class WhisperAppController:
 
             # Start persistent media controller for pause/resume
             if not self._media:
-                browser_bridge = BrowserMediaBridge(logger=self.log)
+                browser_bridge = BrowserMediaBridge(
+                    logger=self.log,
+                    debug=self.config.get("debug", False),
+                )
                 self._media = MediaController(
                     logger=self.log,
                     browser_bridge=browser_bridge,
                 )
+                self._start_media_worker()
                 threading.Thread(
                     target=browser_bridge.start,
                     name="browser-media-warmup",
@@ -907,9 +941,7 @@ class WhisperAppController:
             if self.live_transcribe_thread:
                 self.live_transcribe_thread.join(timeout=1)
             self.recorder.stop()
-            if self._media:
-                self._media.resume()
-            self._we_paused_media = False
+            self._queue_media_resume()
             self.log("Recording cancelled.")
             self.set_status("Ready")
 
@@ -948,15 +980,11 @@ class WhisperAppController:
             with self._ptt_lock:
                 if not self.recorder or self.recorder.recording:
                     return
-                self._we_paused_media = False
                 self._ptt_gen += 1
                 # Recording starts FIRST — the SMTC media pause can take
                 # hundreds of ms and must never delay capturing speech.
                 self._start_recording()
-                if self.config.get("pause_media", True) and self._media:
-                    threading.Thread(
-                        target=self._pause_media_bg, args=(self._ptt_gen,), daemon=True
-                    ).start()
+                self._queue_media_pause()
             # Key already released while we were starting (quick tap) —
             # stop now, or recording runs forever.
             if not self._pressed_hold_keys:
@@ -964,17 +992,48 @@ class WhisperAppController:
 
         threading.Thread(target=do_start, daemon=True).start()
 
-    def _pause_media_bg(self, gen: int) -> None:
-        """Pause media in parallel with an already-running recording."""
-        if not self._media:
+    def _start_media_worker(self) -> None:
+        """Start the single thread that serializes every media pause/resume."""
+        if self._media_thread and self._media_thread.is_alive():
             return
-        if not self._media.pause_if_playing():
-            return
-        if gen == self._ptt_gen and self.recorder and self.recorder.recording:
-            self._we_paused_media = True
-        else:
-            # The take already ended (quick tap) — undo the late pause.
-            self._media.resume()
+        self._media_thread = threading.Thread(
+            target=self._media_worker,
+            name="media-control",
+            daemon=True,
+        )
+        self._media_thread.start()
+
+    def _media_worker(self) -> None:
+        """Apply queued media commands strictly in the order they were pressed."""
+        while True:
+            job = self._media_queue.get()
+            if job is None:
+                return
+            action, gen = job
+            try:
+                if not self._media:
+                    continue
+                if action == "pause":
+                    # The take is already over (quick tap, or a slow SMTC call
+                    # while the user kept typing) — pausing now would stop
+                    # media with no resume left to undo it.
+                    if gen != self._ptt_gen:
+                        continue
+                    self._media.pause_if_playing()
+                else:
+                    self._media.resume()
+            except Exception as exc:  # noqa: BLE001
+                self.log(f"Media control error ({action}): {exc}")
+
+    def _queue_media_pause(self) -> None:
+        """Ask the media worker to silence everything that is playing."""
+        if self._media and self.config.get("pause_media", True):
+            self._media_queue.put(("pause", self._ptt_gen))
+
+    def _queue_media_resume(self) -> None:
+        """Ask the media worker to restore only what this app paused."""
+        if self._media:
+            self._media_queue.put(("resume", self._ptt_gen))
 
     def _on_hold_release(self) -> None:
         """Handle hold key release — stop recording, transcribe, auto-type."""
@@ -994,13 +1053,10 @@ class WhisperAppController:
             )
             if not self.recorder.recording and not stream_died:
                 return
-            # Invalidate a pause still in flight before resuming. This closes
-            # the release-time race where media became paused after the old
-            # boolean check and then stayed paused forever.
+            # Invalidate a pause still queued behind us; the resume itself is
+            # issued by _stop_recording_and_type once the microphone is shut,
+            # so the tail of the take can never capture the video's audio.
             self._ptt_gen += 1
-            if self._media:
-                self._media.resume()
-            self._we_paused_media = False
             self._stop_recording_and_type()
 
     def _verify_mic_alive(self) -> None:
@@ -1050,6 +1106,12 @@ class WhisperAppController:
         self.listener = None
         self._hold_listener = None
         if self._media:
+            # Let queued work finish first, then restore media and kill the
+            # helper — an abandoned helper would leave the video paused.
+            self._media_queue.put(None)
+            if self._media_thread:
+                self._media_thread.join(timeout=5.0)
+                self._media_thread = None
             self._media.stop()
         self.overlay.stop()
 
@@ -1085,24 +1147,17 @@ class WhisperAppController:
             return
 
         if self.recorder.recording:
+            # Media is resumed inside the stop helpers, right after the
+            # microphone closes — never before it.
             self._ptt_gen += 1
-            if self._media:
-                self._media.resume()
-            self._we_paused_media = False
             if self.config.get("auto_type", False):
                 self._stop_recording_and_type()
             else:
                 self._stop_recording()
         else:
-            self._we_paused_media = False
             self._ptt_gen += 1
             self._start_recording()
-            if self.config.get("pause_media", True) and self._media:
-                threading.Thread(
-                    target=self._pause_media_bg,
-                    args=(self._ptt_gen,),
-                    daemon=True,
-                ).start()
+            self._queue_media_pause()
 
     def _start_recording(self) -> None:
         """Handle the start of an audio recording session."""
@@ -1136,19 +1191,23 @@ class WhisperAppController:
         self.overlay.show_processing()
         self.set_status("Processing")
 
-        # Stop live transcription loop
         self.stop_live_transcribe.set()
-        if self.live_transcribe_thread:
-            self.live_transcribe_thread.join(timeout=5.0)
-            if self.live_transcribe_thread.is_alive():
-                self.log("Warning: live transcription thread did not stop in time")
-            self.live_transcribe_thread = None
 
         if not self.recorder:
             self._hide_overlay_if_idle()
             return
 
+        # Close the microphone BEFORE media may play again, and before joining
+        # the live-preview thread: that join can take seconds, and every one of
+        # them would be recorded with the video already audible.
         audio_data = self.recorder.stop()
+        self._queue_media_resume()
+
+        if self.live_transcribe_thread:
+            self.live_transcribe_thread.join(timeout=5.0)
+            if self.live_transcribe_thread.is_alive():
+                self.log("Warning: live transcription thread did not stop in time")
+            self.live_transcribe_thread = None
 
         if audio_data is not None:
             self._begin_processing()
@@ -1205,19 +1264,23 @@ class WhisperAppController:
         self.overlay.show_processing()
         self.set_status("Processing")
 
-        # Stop live transcription loop
         self.stop_live_transcribe.set()
-        if self.live_transcribe_thread:
-            self.live_transcribe_thread.join(timeout=5.0)
-            if self.live_transcribe_thread.is_alive():
-                self.log("Warning: live transcription thread did not stop in time")
-            self.live_transcribe_thread = None
 
         if not self.recorder:
             self._hide_overlay_if_idle()
             return
 
+        # Close the microphone BEFORE media may play again, and before joining
+        # the live-preview thread: that join can take seconds, and every one of
+        # them would be recorded with the video already audible.
         audio_data = self.recorder.stop()
+        self._queue_media_resume()
+
+        if self.live_transcribe_thread:
+            self.live_transcribe_thread.join(timeout=5.0)
+            if self.live_transcribe_thread.is_alive():
+                self.log("Warning: live transcription thread did not stop in time")
+            self.live_transcribe_thread = None
 
         if audio_data is not None:
             self._begin_processing()

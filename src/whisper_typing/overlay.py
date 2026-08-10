@@ -7,10 +7,11 @@ import logging
 import math
 import threading
 import tkinter as tk
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
-from PIL import Image, ImageDraw, ImageFilter, ImageTk
+from PIL import Image, ImageDraw, ImageFilter, ImageSequence, ImageTk
 
 if TYPE_CHECKING:
     from whisper_typing.audio_capture import AudioRecorder
@@ -35,6 +36,12 @@ MAX_FFT_SAMPLES = 4096
 MIN_SPECTRUM_PEAK = 1e-12
 MODE_RECORDING = "recording"
 MODE_PROCESSING = "processing"
+# Animated GIF shown while Whisper transcribes. Ships with the package so a
+# fresh clone behaves the same; the drawn spinner below is the fallback.
+PROCESSING_ASSET = Path(__file__).with_name("assets") / "processing.gif"
+MIN_FRAME_MS = 20
+DARK_BACKDROP_LEVEL = 24
+FULLY_OPAQUE = 255
 
 
 def _mix_rgb(
@@ -125,6 +132,58 @@ def _processing_pil_frames() -> list[Image.Image]:
         )
 
     return frames
+
+
+def _drop_dark_background(image: Image.Image) -> Image.Image:
+    """Knock out a near-black backdrop so the subject floats.
+
+    Meme GIFs are usually opaque rectangles. Left as-is the overlay shows a
+    black tile over every light-coloured window, which is far more intrusive
+    than the animation itself.
+    """
+    pixels = np.asarray(image, dtype=np.uint8).copy()
+    backdrop = pixels[:, :, :3].max(axis=2) <= DARK_BACKDROP_LEVEL
+    pixels[:, :, 3] = np.where(backdrop, 0, pixels[:, :, 3])
+    return Image.fromarray(pixels, mode="RGBA")
+
+
+def _gif_animation(path: Path) -> tuple[list[Image.Image], list[int]] | None:
+    """Load an animated GIF scaled into the overlay square, or None."""
+    try:
+        frames: list[Image.Image] = []
+        delays: list[int] = []
+        with Image.open(path) as source:
+            for frame in ImageSequence.Iterator(source):
+                image = frame.convert("RGBA")
+                if image.getchannel("A").getextrema()[0] == FULLY_OPAQUE:
+                    image = _drop_dark_background(image)
+                # thumbnail keeps the aspect ratio, so a non-square meme is
+                # letterboxed into the square window instead of stretched.
+                image.thumbnail(
+                    (PROCESSING_SIZE, PROCESSING_SIZE),
+                    Image.Resampling.LANCZOS,
+                )
+                frames.append(image)
+                duration = int(frame.info.get("duration") or PROCESSING_FRAME_MS)
+                delays.append(max(MIN_FRAME_MS, duration))
+    except Exception:  # noqa: BLE001
+        logging.getLogger("whisper_typing").warning(
+            "Could not read %s — falling back to the drawn spinner.", path
+        )
+        return None
+    if not frames:
+        return None
+    return frames, delays
+
+
+def _processing_animation() -> tuple[list[Image.Image], list[int]]:
+    """Return (frames, per-frame delays) for the processing indicator."""
+    loaded = _gif_animation(PROCESSING_ASSET)
+    if loaded is not None:
+        return loaded
+    frames = _processing_pil_frames()
+    return frames, [PROCESSING_FRAME_MS] * len(frames)
+
 
 # Available visualizer styles
 STYLES = [
@@ -237,6 +296,7 @@ class AudioOverlay:
         self._pending_mode: str | None = None
         self._last_render_error: str | None = None
         self._processing_frames: list[ImageTk.PhotoImage] = []
+        self._processing_delays: list[int] = []
         # For dots style — peak trackers
         self._dot_peaks: list[float] = [0.0] * BAR_COUNT
         self._dot_velocities: list[float] = [0.0] * BAR_COUNT
@@ -379,17 +439,28 @@ class AudioOverlay:
         finally:
             if self._running and self._root:
                 frame_ms = (
-                    PROCESSING_FRAME_MS if self._processing else VISUALIZER_FRAME_MS
+                    self._processing_frame_ms()
+                    if self._processing
+                    else VISUALIZER_FRAME_MS
                 )
                 self._root.after(frame_ms, self._update_loop)
 
     def _prepare_processing_frames(self) -> None:
-        """Create Tk images once so showing the spinner is instantaneous."""
+        """Create Tk images once so showing the animation is instantaneous."""
         if self._processing_frames or not self._root:
             return
+        frames, delays = _processing_animation()
         self._processing_frames = [
-            ImageTk.PhotoImage(frame, master=self._root)
-            for frame in _processing_pil_frames()
+            ImageTk.PhotoImage(frame, master=self._root) for frame in frames
+        ]
+        self._processing_delays = delays
+
+    def _processing_frame_ms(self) -> int:
+        """Honour the GIF's own per-frame timing instead of a fixed cadence."""
+        if not self._processing_delays:
+            return PROCESSING_FRAME_MS
+        return self._processing_delays[
+            self._frame_count % len(self._processing_delays)
         ]
 
     def _init_processing(self) -> None:

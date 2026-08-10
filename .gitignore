@@ -19,3 +19,5 @@ history.json.corrupt
 _history.html
 _history.html.tmp
 config.json.tmp
+_spinners.html
+_loaders/

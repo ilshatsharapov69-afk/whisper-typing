@@ -353,6 +353,81 @@ def test_config_round_trip_is_atomic_and_unicode_safe(tmp_path: Path) -> None:
     assert not path.with_suffix(".json.tmp").exists()
 
 
+def test_media_resumes_only_after_the_microphone_is_closed(
+    mock_dependencies: dict[str, Any],  # noqa: ARG001
+) -> None:
+    """Test the tail of a take can never record the video's own audio."""
+    controller = WhisperAppController()
+    controller.config = DEFAULT_CONFIG | {"gemini_api_key": "fake", "auto_type": True}
+    controller.initialize_components()
+    assert controller.recorder is not None
+    controller.recorder.recording = True
+    # No transcriber: the background job must not reach the real clipboard and
+    # fire Ctrl+V into whatever window the developer has focused.
+    controller.transcriber = None
+    order: list[str] = []
+
+    def stop_recorder() -> str:
+        order.append("microphone-closed")
+        controller.recorder.recording = False
+        return "audio"
+
+    controller.recorder.stop.side_effect = stop_recorder
+
+    with (
+        patch.object(
+            controller,
+            "_queue_media_resume",
+            side_effect=lambda: order.append("media-resumed"),
+        ),
+        patch("whisper_typing.app_controller.save_audio_backup", return_value=None),
+    ):
+        controller.on_record_toggle()
+
+    assert order == ["microphone-closed", "media-resumed"]
+
+
+def test_a_pause_queued_by_an_already_finished_take_is_dropped(
+    mock_dependencies: dict[str, Any],  # noqa: ARG001
+) -> None:
+    """Test a quick tap cannot leave media paused with no resume behind it."""
+    controller = WhisperAppController()
+    controller.config = DEFAULT_CONFIG | {"gemini_api_key": "fake"}
+    controller.initialize_components()
+    media = MagicMock()
+    controller._media = media  # noqa: SLF001
+
+    controller._ptt_gen = 1  # noqa: SLF001
+    controller._queue_media_pause()  # noqa: SLF001
+    # The take ended before the worker reached the job.
+    controller._ptt_gen = 2  # noqa: SLF001
+    controller._media_queue.put(None)  # noqa: SLF001
+    controller._media_worker()  # noqa: SLF001
+
+    media.pause_if_playing.assert_not_called()
+
+
+def test_media_commands_run_in_the_order_the_keys_were_pressed(
+    mock_dependencies: dict[str, Any],  # noqa: ARG001
+) -> None:
+    """Test a slow pause can no longer land after the resume that undoes it."""
+    controller = WhisperAppController()
+    controller.config = DEFAULT_CONFIG | {"gemini_api_key": "fake"}
+    controller.initialize_components()
+    order: list[str] = []
+    media = MagicMock()
+    media.resume.side_effect = lambda: order.append("resume")
+    media.pause_if_playing.side_effect = lambda: order.append("pause")
+    controller._media = media  # noqa: SLF001
+
+    controller._queue_media_resume()  # end of the previous take  # noqa: SLF001
+    controller._queue_media_pause()  # start of the next one  # noqa: SLF001
+    controller._media_queue.put(None)  # noqa: SLF001
+    controller._media_worker()  # noqa: SLF001
+
+    assert order == ["resume", "pause"]
+
+
 def test_windows_match_prefers_native_handle() -> None:
     """Test safe focus comparison for separate wrappers of one HWND."""
     first = MagicMock()

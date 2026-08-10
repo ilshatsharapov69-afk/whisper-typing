@@ -79,7 +79,7 @@ class AudioRecorder:
         with self._lock:
             self.frames.append(indata.copy())
             self._total_samples += len(indata)
-            # Prevent unbounded memory growth — trim oldest frames beyond 5 min
+            # Prevent unbounded memory growth — trim oldest frames past _MAX_SAMPLES
             while self._total_samples > self._MAX_SAMPLES and len(self.frames) > 1:
                 removed = self.frames.pop(0)
                 self._total_samples -= len(removed)
