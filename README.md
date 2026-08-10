@@ -12,6 +12,8 @@ A background speech-to-text application for Windows that runs locally. It listen
 - **System Tray Icon**: Runs in the background with a color-coded tray icon (green = ready, red = recording, yellow = processing).
 - **Audio Overlay**: Floating audio level visualization while recording.
 - **Media Auto-Pause**: Pauses every Windows media session plus Chrome/Edge Picture-in-Picture when recording starts, then resumes only what the app paused. Media the user had already paused stays paused. Verify it on real windows with `python -X utf8 tools/media_selftest.py`.
+- **Control panel**: right-click the tray icon (or use the Desktop shortcut created by `install_shortcut.ps1`) and choose **Открыть панель**. A local page on `127.0.0.1` lets you swap the loading animation, change the visualizer, flip the toggles and read the history — all applied live, no restart. It binds to loopback only, because it can change settings.
+- **Loading animation**: ~770 bundled loaders in `assets/loaders/` (Telegram sticker packs and meme GIFs). Picking one converts it to an animated PNG and the overlay reloads it immediately.
 - **Recovery History**: Right-click the tray icon and choose **History** for a searchable local report with copy buttons and playable WAV backups.
 - **Toggle or Hold**: Press once to start and once to stop (`"toggle"`), or hold the key while speaking (`"hold"`).
 - **Auto-Paste**: Automatically pastes the transcribed text after recording stops.

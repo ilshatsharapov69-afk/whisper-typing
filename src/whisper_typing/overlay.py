@@ -36,9 +36,11 @@ MAX_FFT_SAMPLES = 4096
 MIN_SPECTRUM_PEAK = 1e-12
 MODE_RECORDING = "recording"
 MODE_PROCESSING = "processing"
-# Animated GIF shown while Whisper transcribes. Ships with the package so a
-# fresh clone behaves the same; the drawn spinner below is the fallback.
-PROCESSING_ASSET = Path(__file__).with_name("assets") / "processing.gif"
+# Animation shown while Whisper transcribes. One canonical file (animated PNG
+# or GIF) that the dashboard rewrites when the user picks another loader; the
+# drawn spinner below is the fallback if it is missing or unreadable.
+ASSETS = Path(__file__).with_name("assets")
+PROCESSING_ASSET = ASSETS / "processing.png"
 MIN_FRAME_MS = 20
 DARK_BACKDROP_LEVEL = 24
 FULLY_OPAQUE = 255
@@ -834,8 +836,15 @@ class AudioOverlay:
             self._root.deiconify()
             self._visible = True
 
+    def reload_processing_animation(self) -> None:
+        """Pick up a processing animation the dashboard just replaced."""
+        self._processing_frames = []
+        self._processing_delays = []
+        if self._root:
+            self._root.after(0, self._prepare_processing_frames)
+
     def show_processing(self) -> None:
-        """Replace the recording visualizer with a blue loading spinner."""
+        """Replace the recording visualizer with the processing animation."""
         self._recorder = None
         self._pending_mode = MODE_PROCESSING
         if self._root:

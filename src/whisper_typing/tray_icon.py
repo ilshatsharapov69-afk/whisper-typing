@@ -51,6 +51,7 @@ class TrayManager:
         on_config_toggle: "Callable[[str, bool], None] | None" = None,
         on_pause: "Callable[[], None] | None" = None,
         on_history: "Callable[[], None] | None" = None,
+        on_dashboard: "Callable[[], None] | None" = None,
     ) -> None:
         """Initialize the TrayManager.
 
@@ -67,6 +68,7 @@ class TrayManager:
         self._on_config_toggle = on_config_toggle
         self._on_pause = on_pause
         self._on_history = on_history
+        self._on_dashboard = on_dashboard
         self._icon: Icon | None = None
         self._thread: threading.Thread | None = None
         self._current_state = "ready"
@@ -116,6 +118,10 @@ class TrayManager:
 
         return Menu(
             MenuItem("Whisper Typing", None, enabled=False),
+            Menu.SEPARATOR,
+            # Everything below is also in the dashboard, which is the one place
+            # that can change the loading animation as well.
+            MenuItem("Открыть панель", self._dashboard_clicked, default=True),
             Menu.SEPARATOR,
             MenuItem(
                 "AI Format",
@@ -246,6 +252,10 @@ class TrayManager:
 
     def _make_gradient_checker(self, gradient: str) -> "Callable[[Any], bool]":
         return lambda _: self._config.get("visualizer_gradient", "green_red") == gradient
+
+    def _dashboard_clicked(self, icon: Any, item: Any) -> None:  # noqa: ANN401
+        if self._on_dashboard:
+            self._on_dashboard()
 
     def _history_clicked(self, icon: Any, item: Any) -> None:  # noqa: ANN401
         if self._on_history:

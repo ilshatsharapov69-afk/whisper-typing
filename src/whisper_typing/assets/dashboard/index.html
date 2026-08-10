@@ -1,0 +1,263 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Whisper Typing</title>
+<style>
+  *,*::before,*::after{box-sizing:border-box}
+  :root{--bg:#0b0d10;--panel:#13171c;--line:#242c35;--ink:#e8eef5;
+        --muted:#8d9aa8;--accent:#4aa8ff;--ok:#37d67a}
+  html,body{margin:0;background:var(--bg);color:var(--ink);
+    font:14px/1.55 "Segoe UI",system-ui,sans-serif;-webkit-font-smoothing:antialiased}
+  header{position:sticky;top:0;z-index:9;background:rgba(11,13,16,.94);
+    backdrop-filter:blur(10px);border-bottom:1px solid var(--line);padding:14px 26px}
+  .top{display:flex;align-items:center;gap:14px;flex-wrap:wrap}
+  h1{margin:0;font-size:17px;font-weight:600;letter-spacing:-.01em}
+  .now{display:flex;align-items:center;gap:9px;margin-left:auto;color:var(--muted);
+    font-size:12.5px}
+  .now img{width:34px;height:34px;object-fit:contain;background:#0e1216;
+    border:1px solid var(--line);border-radius:8px}
+  nav{display:flex;gap:7px;margin-top:12px;flex-wrap:wrap}
+  nav button{background:var(--panel);border:1px solid var(--line);color:var(--muted);
+    border-radius:99px;padding:6px 15px;font:inherit;font-size:13px;cursor:pointer}
+  nav button.on{background:var(--accent);border-color:var(--accent);color:#04121f;
+    font-weight:600}
+  main{padding:22px 26px 60px;max-width:1500px;margin:0 auto}
+  .tab{display:none}.tab.on{display:block}
+  .row{display:flex;gap:9px;flex-wrap:wrap;margin:0 0 20px}
+  .chip{background:var(--panel);border:1px solid var(--line);color:var(--muted);
+    border-radius:99px;padding:5px 13px;font-size:12.5px;cursor:pointer}
+  .chip.on{background:var(--accent);border-color:var(--accent);color:#04121f;font-weight:600}
+  .tiles{display:grid;gap:9px;grid-template-columns:repeat(auto-fill,minmax(104px,1fr))}
+  .tile{background:var(--panel);border:1px solid var(--line);border-radius:11px;
+    padding:9px 6px 7px;display:grid;justify-items:center;gap:4px;cursor:pointer;
+    text-align:center;content-visibility:auto;contain-intrinsic-size:104px 108px}
+  .tile:hover{border-color:#3a4756}
+  .tile.on{border-color:var(--accent);box-shadow:0 0 0 1px var(--accent) inset}
+  .tile img,.tile video{width:60px;height:60px;object-fit:contain;display:block}
+  .tile span{font-size:10px;color:var(--muted);overflow-wrap:anywhere;line-height:1.2}
+  .divider{grid-column:1/-1;margin:16px 0 4px;color:var(--muted);font-size:12px;
+    letter-spacing:.1em;text-transform:uppercase}
+  .cards{display:grid;gap:14px;grid-template-columns:repeat(auto-fill,minmax(250px,1fr))}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:13px;padding:15px}
+  .card h3{margin:0 0 4px;font-size:14.5px}
+  .card p{margin:0 0 12px;color:var(--muted);font-size:12.5px}
+  .opts{display:flex;flex-direction:column;gap:6px}
+  .opt{display:flex;align-items:center;gap:9px;padding:7px 10px;border-radius:9px;
+    border:1px solid var(--line);cursor:pointer;font-size:13px}
+  .opt.on{border-color:var(--accent);background:#152230}
+  .sw{width:34px;height:19px;border-radius:99px;background:#2a333d;position:relative;
+    flex:none;transition:background .15s}
+  .sw::after{content:"";position:absolute;top:2px;left:2px;width:15px;height:15px;
+    border-radius:50%;background:#8d9aa8;transition:transform .15s,background .15s}
+  .opt.on .sw{background:var(--accent)}
+  .opt.on .sw::after{transform:translateX(15px);background:#04121f}
+  .hist{display:flex;flex-direction:column;gap:7px}
+  .h{background:var(--panel);border:1px solid var(--line);border-radius:10px;
+    padding:9px 12px;display:flex;gap:12px;align-items:flex-start}
+  .h time{color:var(--muted);font-size:11.5px;white-space:nowrap;font-variant-numeric:tabular-nums}
+  .h p{margin:0;flex:1;font-size:13px;overflow-wrap:anywhere}
+  .h.err{border-color:#5a2a2a}
+  .h button{background:#0d1116;border:1px solid var(--line);color:var(--muted);
+    border-radius:7px;padding:3px 9px;font:inherit;font-size:11.5px;cursor:pointer}
+  .btn{background:var(--panel);border:1px solid var(--line);color:var(--ink);
+    border-radius:9px;padding:8px 14px;font:inherit;font-size:13px;cursor:pointer}
+  .btn:hover{border-color:#3a4756}
+  .btn.primary{background:var(--accent);border-color:var(--accent);color:#04121f;font-weight:600}
+  .kv{display:grid;grid-template-columns:auto 1fr;gap:5px 14px;font-size:12.5px}
+  .kv b{color:var(--muted);font-weight:400}
+  .toast{position:fixed;right:20px;bottom:20px;background:#152230;color:var(--ink);
+    border:1px solid var(--accent);border-radius:10px;padding:10px 16px;font-size:13px;
+    opacity:0;transform:translateY(8px);transition:all .18s;pointer-events:none}
+  .toast.on{opacity:1;transform:none}
+</style>
+</head>
+<body>
+<header>
+  <div class="top">
+    <h1>Whisper Typing</h1>
+    <div class="now">сейчас крутится<img id="current" src="/current.png" alt=""></div>
+  </div>
+  <nav>
+    <button data-tab="loader" class="on">Загрузка</button>
+    <button data-tab="eq">Эквалайзер</button>
+    <button data-tab="history">История</button>
+    <button data-tab="settings">Настройки</button>
+  </nav>
+</header>
+
+<main>
+  <section class="tab on" id="tab-loader">
+    <div class="row" id="groups"></div>
+    <div class="row">
+      <button class="btn" id="preview">Показать поверх окон</button>
+      <button class="btn" id="preview-stop">Спрятать</button>
+    </div>
+    <div class="tiles" id="loaders"></div>
+  </section>
+
+  <section class="tab" id="tab-eq">
+    <div class="cards">
+      <div class="card"><h3>Стиль</h3><p>Как выглядит визуализатор во время записи.</p>
+        <div class="opts" id="styles"></div></div>
+      <div class="card"><h3>Цвет</h3><p>Градиент полосок.</p>
+        <div class="opts" id="gradients"></div></div>
+    </div>
+  </section>
+
+  <section class="tab" id="tab-history">
+    <div class="row">
+      <button class="btn" id="open-report">Открыть полный отчёт</button>
+      <button class="btn" id="reload-history">Обновить</button>
+    </div>
+    <div class="hist" id="history"></div>
+  </section>
+
+  <section class="tab" id="tab-settings">
+    <div class="cards">
+      <div class="card"><h3>Поведение</h3><p>Меняется сразу, перезапуск не нужен.</p>
+        <div class="opts" id="toggles"></div></div>
+      <div class="card"><h3>Режим записи</h3>
+        <p>Нажал-нажал или удерживая клавишу.</p>
+        <div class="opts" id="modes"></div></div>
+      <div class="card"><h3>Что настроено</h3><p>Правится в config.json.</p>
+        <div class="kv" id="info"></div></div>
+    </div>
+  </section>
+</main>
+
+<div class="toast" id="toast"></div>
+
+<script>
+const $ = s => document.querySelector(s);
+let STATE = null, LOADERS = [], GROUPS = {}, group = "bazed";
+
+const toast = (t) => { const el = $("#toast"); el.textContent = t; el.classList.add("on");
+  clearTimeout(el._t); el._t = setTimeout(() => el.classList.remove("on"), 1800); };
+
+const post = (path, body) => fetch(path, {method:"POST", headers:{"Content-Type":"application/json"},
+  body: JSON.stringify(body)}).then(r => r.json());
+
+document.querySelectorAll("nav button").forEach(b => b.onclick = () => {
+  document.querySelectorAll("nav button").forEach(x => x.classList.remove("on"));
+  document.querySelectorAll(".tab").forEach(x => x.classList.remove("on"));
+  b.classList.add("on"); $("#tab-" + b.dataset.tab).classList.add("on");
+  if (b.dataset.tab === "history") loadHistory();
+});
+
+// ── загрузка ─────────────────────────────────────────────────────────────
+function renderGroups(){
+  $("#groups").innerHTML = Object.entries(GROUPS).map(([k, label]) => {
+    const n = LOADERS.filter(l => l.group === k).length;
+    return `<button class="chip${k === group ? " on" : ""}" data-g="${k}">${label} (${n})</button>`;
+  }).join("");
+  $("#groups").querySelectorAll("button").forEach(b => b.onclick = () => {
+    group = b.dataset.g; renderGroups(); renderLoaders();
+  });
+}
+
+function renderLoaders(){
+  const mine = LOADERS.filter(l => l.group === group);
+  const current = STATE?.config?.loader;
+  $("#loaders").innerHTML = mine.map(l => {
+    const media = l.kind === "video"
+      ? `<video loop muted playsinline preload="none" src="/loaders/${l.id}"></video>`
+      : `<img loading="lazy" src="/loaders/${l.id}" alt="">`;
+    return `<div class="tile${l.id === current ? " on" : ""}" data-id="${l.id}">
+      ${media}<span>${l.name}</span></div>`;
+  }).join("");
+  $("#loaders").querySelectorAll(".tile").forEach(t => t.onclick = async () => {
+    const r = await post("/api/loader", {id: t.dataset.id});
+    if (r.error) return toast("Не вышло: " + r.error);
+    STATE.config.loader = t.dataset.id;
+    renderLoaders();
+    $("#current").src = "/current.png?" + Date.now();
+    toast("Поставил " + t.dataset.id);
+  });
+  watchVideos();
+}
+
+// Полсотни видео разом браузер не запустит — играем только видимые.
+const seen = new IntersectionObserver(es => es.forEach(e => {
+  const v = e.target;
+  if (e.isIntersecting) { v.muted = true; v.play().catch(() => {}); } else v.pause();
+}), {rootMargin: "250px"});
+const watchVideos = () => document.querySelectorAll(".tile video").forEach(v => seen.observe(v));
+
+$("#preview").onclick = () => post("/api/action", {action: "preview"});
+$("#preview-stop").onclick = () => post("/api/action", {action: "preview_stop"});
+
+// ── эквалайзер и настройки ───────────────────────────────────────────────
+function optList(host, values, current, onPick, labels){
+  host.innerHTML = values.map(v =>
+    `<div class="opt${v === current ? " on" : ""}" data-v="${v}">${(labels && labels[v]) || v}</div>`
+  ).join("");
+  host.querySelectorAll(".opt").forEach(o => o.onclick = () => onPick(o.dataset.v));
+}
+
+const STYLE_RU = {bars:"Полоски", mirror:"Зеркало", wave:"Волна",
+  circles:"Круги", blocks:"Матрица", line:"Линия"};
+const GRAD_RU = {green_red:"Зелёный → красный", cyan_purple:"Циан → фиолетовый",
+  blue_white:"Синий → белый", fire:"Огонь", neon:"Неон"};
+const TOGGLE_RU = {auto_type:"Вставлять текст сам", pause_media:"Ставить видео на паузу",
+  auto_format:"Причёсывать текст через AI", refocus_window:"Возвращать фокус в окно",
+  debug:"Подробный лог"};
+
+async function setConfig(key, value){
+  const r = await post("/api/config", {key, value});
+  if (r.error) return toast(r.error);
+  STATE.config[key] = value;
+  render();
+  toast("Готово");
+}
+
+function render(){
+  const c = STATE.config;
+  optList($("#styles"), STATE.styles, c.visualizer_style,
+    v => setConfig("visualizer_style", v), STYLE_RU);
+  optList($("#gradients"), STATE.gradients, c.visualizer_gradient,
+    v => setConfig("visualizer_gradient", v), GRAD_RU);
+  optList($("#modes"), ["toggle", "hold"], c.record_mode,
+    v => setConfig("record_mode", v),
+    {toggle: "Нажал — говоришь — нажал", hold: "Держишь клавишу"});
+
+  $("#toggles").innerHTML = Object.keys(TOGGLE_RU).map(k =>
+    `<div class="opt${c[k] ? " on" : ""}" data-k="${k}">
+       <span class="sw"></span>${TOGGLE_RU[k]}</div>`).join("");
+  $("#toggles").querySelectorAll(".opt").forEach(o =>
+    o.onclick = () => setConfig(o.dataset.k, !STATE.config[o.dataset.k]));
+
+  $("#info").innerHTML = [
+    ["Горячая клавиша", c.hotkey], ["Модель", c.model],
+    ["Язык", c.language || "определяется сам"], ["Микрофон", c.microphone_name || "системный"],
+    ["Устройство", c.device], ["Загрузка", c.loader || "—"],
+  ].map(([k, v]) => `<b>${k}</b><span>${v}</span>`).join("");
+}
+
+// ── история ──────────────────────────────────────────────────────────────
+async function loadHistory(){
+  const {entries} = await (await fetch("/api/history?n=200")).json();
+  $("#history").innerHTML = entries.map(e => `
+    <div class="h${e.status === "ok" ? "" : " err"}">
+      <time>${(e.timestamp || "").replace("T", " ").slice(0, 19)}</time>
+      <p>${e.text ? e.text.replace(/</g, "&lt;") : "<i>" + e.status + "</i>"}</p>
+      <button>копировать</button></div>`).join("") || "<p style='color:var(--muted)'>Пусто.</p>";
+  $("#history").querySelectorAll("button").forEach((b, i) => b.onclick = () => {
+    navigator.clipboard.writeText(entries[i].text || ""); toast("Скопировал");
+  });
+}
+$("#open-report").onclick = () => post("/api/action", {action: "history_report"});
+$("#reload-history").onclick = loadHistory;
+
+// ── старт ────────────────────────────────────────────────────────────────
+(async () => {
+  STATE = await (await fetch("/api/state")).json();
+  const packs = await (await fetch("/api/loaders")).json();
+  LOADERS = packs.loaders; GROUPS = packs.groups;
+  if (STATE.config.loader) group = STATE.config.loader.split("/")[0];
+  renderGroups(); renderLoaders(); render();
+})();
+</script>
+</body>
+</html>

@@ -46,6 +46,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "visualizer_gradient": "green_red",
     "record_mode": "toggle",
     "auto_type": False,
+    "loader": "bazed/030.webm",
     "format_prompt": (
         "You receive raw speech-to-text output. The speaker may switch between "
         "Russian and English freely, even mid-sentence. Your ONLY job:\n"
@@ -218,9 +219,9 @@ class MediaController:
             )
 
     async def _get_sessions(self) -> list[Any]:
-        from winrt.windows.media.control import (
+        from winrt.windows.media.control import (  # noqa: PLC0415
             GlobalSystemMediaTransportControlsSessionManager as Mgr,
-        )  # noqa: PLC0415
+        )
 
         manager = await Mgr.request_async()
         try:
@@ -353,6 +354,7 @@ class WhisperAppController:
         # supposed to undo it, leaving the video stopped for good.
         self._media_queue: queue.Queue[tuple[str, int] | None] = queue.Queue()
         self._media_thread: threading.Thread | None = None
+        self._dashboard: Any | None = None
         # Self-healing keyboard-hook supervisor
         self._probe_seen: threading.Event = threading.Event()
         self._supervisor_stop: threading.Event = threading.Event()
@@ -388,6 +390,49 @@ class WhisperAppController:
             text, status=status, audio_path=audio_path, error=error
         )
         self.transcription_history = self._persistent_history.recent(50)
+
+    @property
+    def persistent_history(self) -> PersistentHistory:
+        """Expose the history store to the dashboard."""
+        return self._persistent_history
+
+    def apply_setting(self, key: str, value: Any) -> None:  # noqa: ANN401
+        """Change one setting, persist it, and make it take effect now.
+
+        Single entry point for the tray menu and the dashboard so the two can
+        never drift apart.
+        """
+        self.config[key] = value
+        save_config(self.config)
+        if key == "record_mode":
+            # start_listener() already tears down and reinstalls both hooks.
+            # The old tray path called stop() first, which also killed the
+            # overlay and the media worker and never brought them back.
+            self.start_listener()
+        elif key == "visualizer_style":
+            self.overlay.set_style(str(value))
+        elif key == "visualizer_gradient":
+            self.overlay.set_gradient(str(value))
+        self.log(f"Setting changed: {key} = {value}")
+
+    def start_dashboard(self) -> str:
+        """Start the local control panel (idempotent) and return its URL."""
+        if self._dashboard is None:
+            from whisper_typing.dashboard import DashboardServer  # noqa: PLC0415
+
+            self._dashboard = DashboardServer(self)
+            url = self._dashboard.start()
+            self.log(f"Dashboard is at {url}")
+        return self._dashboard.url
+
+    def open_dashboard(self) -> None:
+        """Open the control panel in the default browser."""
+        import webbrowser  # noqa: PLC0415
+
+        try:
+            webbrowser.open(self.start_dashboard())
+        except Exception as exc:  # noqa: BLE001
+            self.log(f"Could not open the dashboard: {exc}")
 
     def open_history(self) -> None:
         """Open the persistent history report from the tray menu."""
@@ -1105,6 +1150,9 @@ class WhisperAppController:
         self._stop_keyboard_listener(self._hold_listener)
         self.listener = None
         self._hold_listener = None
+        if self._dashboard is not None:
+            self._dashboard.stop()
+            self._dashboard = None
         if self._media:
             # Let queued work finish first, then restore media and kill the
             # helper — an abandoned helper would leave the video paused.

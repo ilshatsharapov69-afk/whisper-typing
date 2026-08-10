@@ -96,6 +96,7 @@ class WhisperTui(App[None]):
             on_config_toggle=self._on_config_toggle,
             on_pause=self._tray_pause,
             on_history=self._tray_history,
+            on_dashboard=self._tray_dashboard,
         )
 
     def compose(self) -> ComposeResult:
@@ -299,39 +300,20 @@ class WhisperTui(App[None]):
         await self.push_screen_wait(screen)
 
     def _on_config_toggle(self, key: str, value: object) -> None:
-        """Handle config toggle from tray menu."""
-        from whisper_typing.app_controller import save_config
+        """Handle a config change from the tray menu.
 
-        self.controller.config[key] = value
-        save_config(self.controller.config)
-        label = {
-            "auto_format": "AI Format",
-            "auto_type": "Auto-Type",
-            "pause_media": "Pause Media",
-            "record_mode": "Record mode",
-            "visualizer_style": "Visualizer Style",
-            "visualizer_gradient": "Visualizer Color",
-        }.get(key, key)
-        if key in ("record_mode", "visualizer_style", "visualizer_gradient"):
-            display = value
-        else:
-            display = "ON" if value else "OFF"
-        self.write_log(f"{label}: {display}")
-
-        # Restart listener if record_mode changed (hold vs toggle)
-        if key == "record_mode":
-            self.controller.stop()
-            self.controller.start_listener()
-
-        # Apply visualizer changes live
-        if key == "visualizer_style" and isinstance(value, str):
-            self.controller.overlay.set_style(value)
-        elif key == "visualizer_gradient" and isinstance(value, str):
-            self.controller.overlay.set_gradient(value)
+        Delegates to the controller so the tray and the dashboard apply
+        settings through exactly the same code path.
+        """
+        self.controller.apply_setting(key, value)
 
     def _tray_pause(self) -> None:
         """Handle pause from tray icon."""
         self.call_from_thread(self.action_pause)
+
+    def _tray_dashboard(self) -> None:
+        """Open the control panel from the tray icon."""
+        self.controller.open_dashboard()
 
     def _tray_history(self) -> None:
         """Handle history from tray icon."""
