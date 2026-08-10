@@ -6,39 +6,45 @@ from typing import TYPE_CHECKING, Any
 from PIL import Image, ImageDraw
 from pystray import Icon, Menu, MenuItem
 
-from whisper_typing.overlay import GRADIENTS, STYLES
 
 if TYPE_CHECKING:
     from collections.abc import Callable
 
 
-def _create_icon_image(state: str = "ready") -> Image.Image:
-    """Create a tray icon image based on current state.
+ICON_BASE = 256
+STATE_TILES = {
+    "ready": ((30, 94, 238, 255), (58, 124, 255, 255)),
+    "recording": ((196, 32, 46, 255), (232, 62, 74, 255)),
+    "processing": ((196, 128, 8, 255), (240, 172, 24, 255)),
+}
 
-    Args:
-        state: One of 'ready', 'recording', 'processing'.
 
-    Returns:
-        A PIL Image for the tray icon.
+def draw_app_icon(size: int = ICON_BASE, state: str = "ready") -> Image.Image:
+    """Draw the microphone mark used by the tray, the shortcut and the exe.
 
+    One drawing for every surface, so the tray icon and the Desktop shortcut
+    are visibly the same app; only the tile colour reports the state.
     """
-    size = 64
-    img = Image.new("RGBA", (size, size), (0, 0, 0, 0))
-    draw = ImageDraw.Draw(img)
+    deep, light = STATE_TILES.get(state, STATE_TILES["ready"])
+    image = Image.new("RGBA", (ICON_BASE, ICON_BASE), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(image)
+    draw.rounded_rectangle((8, 8, ICON_BASE - 8, ICON_BASE - 8), radius=56, fill=deep)
+    draw.rounded_rectangle((10, 10, ICON_BASE - 10, 128), radius=54, fill=light)
 
-    colors = {
-        "recording": (220, 40, 40, 255),
-        "processing": (240, 180, 20, 255),
-    }
-    bg = colors.get(state, (50, 160, 80, 255))
-    mic = (255, 255, 255, 255) if state != "processing" else (60, 60, 60, 255)
+    white = (255, 255, 255, 255)
+    draw.rounded_rectangle((100, 52, 156, 150), radius=28, fill=white)
+    draw.arc((76, 96, 180, 186), start=0, end=180, fill=white, width=14)
+    draw.rectangle((121, 178, 135, 200), fill=white)
+    draw.rounded_rectangle((92, 198, 164, 212), radius=7, fill=white)
 
-    draw.ellipse([4, 4, 60, 60], fill=bg)
-    draw.ellipse([22, 12, 42, 38], fill=mic)
-    draw.rectangle([26, 36, 38, 48], fill=mic)
-    draw.rectangle([20, 46, 44, 50], fill=mic)
+    if size != ICON_BASE:
+        image = image.resize((size, size), Image.Resampling.LANCZOS)
+    return image
 
-    return img
+
+def _create_icon_image(state: str = "ready") -> Image.Image:
+    """Create a tray icon image for the current state."""
+    return draw_app_icon(64, state)
 
 
 class TrayManager:
@@ -47,115 +53,55 @@ class TrayManager:
     def __init__(
         self,
         on_quit: "Callable[[], None] | None" = None,
-        config: dict[str, Any] | None = None,
-        on_config_toggle: "Callable[[str, bool], None] | None" = None,
         on_pause: "Callable[[], None] | None" = None,
-        on_history: "Callable[[], None] | None" = None,
-        on_dashboard: "Callable[[], None] | None" = None,
+        on_dashboard: "Callable[[str], None] | None" = None,
     ) -> None:
         """Initialize the TrayManager.
 
         Args:
-            on_quit: Callback when user clicks Quit in tray menu.
-            config: Reference to the app config dict (for reading toggle states).
-            on_config_toggle: Callback(key, new_value) when a config toggle is flipped.
-            on_pause: Callback when user clicks Pause/Resume.
-            on_history: Callback when user clicks History.
+            on_quit: Callback when the user clicks Выход.
+            on_pause: Callback when the user clicks Пауза.
+            on_dashboard: Callback(tab) when the user picks a panel page.
 
         """
         self._on_quit = on_quit
-        self._config = config or {}
-        self._on_config_toggle = on_config_toggle
         self._on_pause = on_pause
-        self._on_history = on_history
         self._on_dashboard = on_dashboard
         self._icon: Icon | None = None
         self._thread: threading.Thread | None = None
         self._current_state = "ready"
 
     def _build_menu(self) -> Menu:
-        """Build the context menu with current toggle states."""
-        cfg = self._config
+        """Build the context menu.
 
-        # Build visualizer style submenu
-        style_labels = {
-            "bars": "Bars (Classic EQ)",
-            "mirror": "Mirror (Symmetric)",
-            "wave": "Wave (Smooth)",
-            "circles": "Circles (Pulsing)",
-            "blocks": "Blocks (LED Matrix)",
-            "line": "Line (Minimal)",
-        }
-        style_items = []
-        for s in STYLES:
-            label = style_labels.get(s, s)
-            style_items.append(
-                MenuItem(
-                    label,
-                    self._make_style_callback(s),
-                    checked=self._make_style_checker(s),
-                )
-            )
-
-        # Build gradient submenu
-        gradient_labels = {
-            "green_red": "Green → Red",
-            "cyan_purple": "Cyan → Purple",
-            "blue_white": "Blue → White",
-            "fire": "Fire",
-            "neon": "Neon",
-        }
-        gradient_items = []
-        for g in GRADIENTS:
-            label = gradient_labels.get(g, g)
-            gradient_items.append(
-                MenuItem(
-                    label,
-                    self._make_gradient_callback(g),
-                    checked=self._make_gradient_checker(g),
-                )
-            )
-
+        Every setting lives in the panel now. The tray keeps only what a menu
+        does better: opening the right page, pausing, and quitting. The old
+        Visualizer submenus were a second place to change the same values.
+        """
         return Menu(
-            MenuItem("Whisper Typing", None, enabled=False),
+            MenuItem("Панель", self._open("loader"), default=True),
             Menu.SEPARATOR,
-            # Everything below is also in the dashboard, which is the one place
-            # that can change the loading animation as well.
-            MenuItem("Открыть панель", self._dashboard_clicked, default=True),
+            MenuItem("Загрузка", self._open("loader")),
+            MenuItem("Стиль и цвет", self._open("eq")),
+            MenuItem("История", self._open("history")),
+            MenuItem("Настройки", self._open("settings")),
             Menu.SEPARATOR,
             MenuItem(
-                "AI Format",
-                self._toggle_auto_format,
-                checked=lambda _: cfg.get("auto_format", False),
-            ),
-            MenuItem(
-                "Auto-Type",
-                self._toggle_auto_type,
-                checked=lambda _: cfg.get("auto_type", False),
-            ),
-            MenuItem(
-                "Pause Media",
-                self._toggle_pause_media,
-                checked=lambda _: cfg.get("pause_media", True),
-            ),
-            MenuItem(
-                "Hold-to-Record",
-                self._toggle_hold_mode,
-                checked=lambda _: cfg.get("record_mode") == "hold",
-            ),
-            Menu.SEPARATOR,
-            MenuItem("Visualizer Style", Menu(*style_items)),
-            MenuItem("Visualizer Color", Menu(*gradient_items)),
-            Menu.SEPARATOR,
-            MenuItem("History", self._history_clicked),
-            MenuItem(
-                "Pause",
+                "Пауза",
                 self._pause_clicked,
                 checked=lambda _: self._current_state == "paused",
             ),
-            Menu.SEPARATOR,
-            MenuItem("Quit", self._quit_clicked),
+            MenuItem("Выход", self._quit_clicked),
         )
+
+    def _open(self, tab: str) -> "Callable[[Any, Any], None]":
+        """Return a menu callback that opens the panel on one tab."""
+
+        def clicked(icon: Any, item: Any) -> None:  # noqa: ANN401, ARG001
+            if self._on_dashboard:
+                self._on_dashboard(tab)
+
+        return clicked
 
     def start(self) -> None:
         """Start the tray icon in a background thread."""
@@ -202,64 +148,6 @@ class TrayManager:
         """Stop and remove the tray icon."""
         if self._icon:
             self._icon.stop()
-
-    def _toggle_auto_format(self, icon: Any, item: Any) -> None:  # noqa: ANN401
-        new_val = not self._config.get("auto_format", False)
-        self._config["auto_format"] = new_val
-        if self._on_config_toggle:
-            self._on_config_toggle("auto_format", new_val)
-        self._icon.menu = self._build_menu()
-
-    def _toggle_auto_type(self, icon: Any, item: Any) -> None:  # noqa: ANN401
-        new_val = not self._config.get("auto_type", False)
-        self._config["auto_type"] = new_val
-        if self._on_config_toggle:
-            self._on_config_toggle("auto_type", new_val)
-        self._icon.menu = self._build_menu()
-
-    def _toggle_pause_media(self, icon: Any, item: Any) -> None:  # noqa: ANN401
-        new_val = not self._config.get("pause_media", True)
-        self._config["pause_media"] = new_val
-        if self._on_config_toggle:
-            self._on_config_toggle("pause_media", new_val)
-        self._icon.menu = self._build_menu()
-
-    def _toggle_hold_mode(self, icon: Any, item: Any) -> None:  # noqa: ANN401
-        new_val = "toggle" if self._config.get("record_mode") == "hold" else "hold"
-        self._config["record_mode"] = new_val
-        if self._on_config_toggle:
-            self._on_config_toggle("record_mode", new_val)
-        self._icon.menu = self._build_menu()
-
-    def _make_style_callback(self, style: str) -> "Callable[[Any, Any], None]":
-        def cb(icon: Any, item: Any) -> None:  # noqa: ANN401
-            self._config["visualizer_style"] = style
-            if self._on_config_toggle:
-                self._on_config_toggle("visualizer_style", style)
-            self._icon.menu = self._build_menu()
-        return cb
-
-    def _make_style_checker(self, style: str) -> "Callable[[Any], bool]":
-        return lambda _: self._config.get("visualizer_style", "bars") == style
-
-    def _make_gradient_callback(self, gradient: str) -> "Callable[[Any, Any], None]":
-        def cb(icon: Any, item: Any) -> None:  # noqa: ANN401
-            self._config["visualizer_gradient"] = gradient
-            if self._on_config_toggle:
-                self._on_config_toggle("visualizer_gradient", gradient)
-            self._icon.menu = self._build_menu()
-        return cb
-
-    def _make_gradient_checker(self, gradient: str) -> "Callable[[Any], bool]":
-        return lambda _: self._config.get("visualizer_gradient", "green_red") == gradient
-
-    def _dashboard_clicked(self, icon: Any, item: Any) -> None:  # noqa: ANN401
-        if self._on_dashboard:
-            self._on_dashboard()
-
-    def _history_clicked(self, icon: Any, item: Any) -> None:  # noqa: ANN401
-        if self._on_history:
-            self._on_history()
 
     def _pause_clicked(self, icon: Any, item: Any) -> None:  # noqa: ANN401
         if self._on_pause:

@@ -139,12 +139,18 @@ const toast = (t) => { const el = $("#toast"); el.textContent = t; el.classList.
 const post = (path, body) => fetch(path, {method:"POST", headers:{"Content-Type":"application/json"},
   body: JSON.stringify(body)}).then(r => r.json());
 
-document.querySelectorAll("nav button").forEach(b => b.onclick = () => {
-  document.querySelectorAll("nav button").forEach(x => x.classList.remove("on"));
-  document.querySelectorAll(".tab").forEach(x => x.classList.remove("on"));
-  b.classList.add("on"); $("#tab-" + b.dataset.tab).classList.add("on");
-  if (b.dataset.tab === "history") loadHistory();
-});
+function showTab(name){
+  if (!document.getElementById("tab-" + name)) name = "loader";
+  document.querySelectorAll("nav button").forEach(x =>
+    x.classList.toggle("on", x.dataset.tab === name));
+  document.querySelectorAll(".tab").forEach(x =>
+    x.classList.toggle("on", x.id === "tab-" + name));
+  if (name === "history") loadHistory();
+}
+document.querySelectorAll("nav button").forEach(b =>
+  b.onclick = () => { location.hash = b.dataset.tab; });
+// Трей открывает панель сразу на нужной странице: .../#history
+addEventListener("hashchange", () => showTab(location.hash.slice(1)));
 
 // ── загрузка ─────────────────────────────────────────────────────────────
 function renderGroups(){
@@ -257,6 +263,7 @@ $("#reload-history").onclick = loadHistory;
   LOADERS = packs.loaders; GROUPS = packs.groups;
   if (STATE.config.loader) group = STATE.config.loader.split("/")[0];
   renderGroups(); renderLoaders(); render();
+  showTab(location.hash.slice(1) || "loader");
 })();
 </script>
 </body>

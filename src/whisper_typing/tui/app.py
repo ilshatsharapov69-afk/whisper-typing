@@ -92,10 +92,7 @@ class WhisperTui(App[None]):
         self.controller = controller
         self.tray = TrayManager(
             on_quit=self._tray_quit,
-            config=controller.config,
-            on_config_toggle=self._on_config_toggle,
             on_pause=self._tray_pause,
-            on_history=self._tray_history,
             on_dashboard=self._tray_dashboard,
         )
 
@@ -311,9 +308,9 @@ class WhisperTui(App[None]):
         """Handle pause from tray icon."""
         self.call_from_thread(self.action_pause)
 
-    def _tray_dashboard(self) -> None:
-        """Open the control panel from the tray icon."""
-        self.controller.open_dashboard()
+    def _tray_dashboard(self, tab: str = "loader") -> None:
+        """Open the control panel from the tray icon on the requested page."""
+        self.controller.open_dashboard(tab)
 
     def _tray_history(self) -> None:
         """Handle history from tray icon."""

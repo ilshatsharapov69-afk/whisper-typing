@@ -5,6 +5,8 @@ import ctypes
 import json
 import os
 import queue
+import shutil
+import subprocess
 import threading
 import time
 from pathlib import Path
@@ -102,6 +104,24 @@ def save_config(config: dict[str, Any], config_path: str = "config.json") -> Non
         tmp.replace(path)
     except Exception:  # noqa: BLE001, S110
         pass
+
+
+def _app_window_browsers() -> list[str]:
+    """Chromium executables that can host the panel as a standalone window."""
+    candidates = [shutil.which(name) for name in ("chrome", "msedge", "brave")]
+    program_files = (
+        Path(os.environ.get("PROGRAMFILES", r"C:\Program Files")),
+        Path(os.environ.get("PROGRAMFILES(X86)", r"C:\Program Files (x86)")),
+        Path(os.environ.get("LOCALAPPDATA", "")) if os.environ.get("LOCALAPPDATA") else None,
+    )
+    for root in program_files:
+        if root is None:
+            continue
+        candidates += [
+            str(root / "Google/Chrome/Application/chrome.exe"),
+            str(root / "Microsoft/Edge/Application/msedge.exe"),
+        ]
+    return [path for path in candidates if path and Path(path).is_file()]
 
 
 class MediaController:
@@ -425,14 +445,35 @@ class WhisperAppController:
             self.log(f"Dashboard is at {url}")
         return self._dashboard.url
 
-    def open_dashboard(self) -> None:
-        """Open the control panel in the default browser."""
+    def open_dashboard(self, tab: str = "loader") -> None:
+        """Open the control panel as its own window.
+
+        Chromium's ``--app=`` gives a frameless window with no tabs or address
+        bar, so the panel looks like part of the application instead of a
+        browser page. A normal browser tab is the fallback.
+        """
+        url = f"{self.start_dashboard()}#{tab}"
+        for browser in _app_window_browsers():
+            try:
+                subprocess.Popen(  # noqa: S603
+                    [
+                        browser,
+                        f"--app={url}",
+                        "--window-size=1240,860",
+                        f"--user-data-dir={Path.home() / '.whisper-typing-panel'}",
+                    ],
+                    creationflags=0x08000000,
+                )
+            except Exception:  # noqa: BLE001, S112
+                continue
+            else:
+                return
         import webbrowser  # noqa: PLC0415
 
         try:
-            webbrowser.open(self.start_dashboard())
+            webbrowser.open(url)
         except Exception as exc:  # noqa: BLE001
-            self.log(f"Could not open the dashboard: {exc}")
+            self.log(f"Could not open the panel: {exc}")
 
     def open_history(self) -> None:
         """Open the persistent history report from the tray menu."""
